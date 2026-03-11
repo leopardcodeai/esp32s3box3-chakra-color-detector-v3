@@ -1,0 +1,73 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  ESP32-S3-BOX-3 — Device Configuration
+#  Edit ONLY this file to customise your device.
+#  Do NOT edit esp32s3box3.yaml directly.
+# ═══════════════════════════════════════════════════════════════════════════
+
+substitutions:
+
+  # ── Device identity ───────────────────────────────────────────────────────
+  name: esp32-s3box-3              # mDNS hostname: <name>.local — changing breaks HA link
+  friendly_name: ESP32-S3-Box-3   # Display name in Home Assistant
+
+  # ── Home Assistant ────────────────────────────────────────────────────────
+  home_assistant_host: http://192.168.0.55:8123
+
+  # ── HA entities ───────────────────────────────────────────────────────────
+  external_media_player: spotify_dr_eng_alexander_brunker   # → media_player.<this>
+  chakra_light_entity: living_room                  # → light.<this>  (NO 'light.' prefix!)
+  ha_timer_entity: timer.home_assistant_timer       # full entity_id incl. domain
+
+  # ── Voice / TTS ───────────────────────────────────────────────────────────
+  tts_voice_speed: "16000"   # 16000 = Piper (free, local)  |  24000 = NabuCasa  |  44100 = ElevenLabs
+
+  # ── Wake words (installed on-device — no recompile needed to switch) ──────
+  micro_wake_word_model_1: hey_jarvis
+  micro_wake_word_model_2: hey_homeassist
+  micro_wake_word_model_3: hey_jarvis
+  micro_wake_word_model_4: hey_mycroft
+
+  # ── Display brightness ────────────────────────────────────────────────────
+  default_brightness: "100"    # active screen brightness  (20 – 100 %)
+  saver_brightness: "30"       # screen-saver brightness   (20 – 100 %)
+
+  # ── Display theme ─────────────────────────────────────────────────────────
+  # White theme (default):
+  display_bg_hex: 'ffffff'      # page background colour
+  display_text_hex: '333333'    # dark text on white background
+
+  # Dark (bg_blue) theme — comment the two lines above and uncomment below:
+  # display_bg_hex: '032341'
+  # display_text_hex: 'ffffff'
+
+  # Other available dark backgrounds (use with display_text_hex: 'ffffff'):
+  #   bg_purple  301020
+  #   bg_green   05350B
+  #   bg_red     3C0000
+  #   bg_pink    61034D
+  #   bg_charcoal 323232
+  #   bg_brown   41220D
+
+  # ── Locale — days & months ────────────────────────────────────────────────
+  timezone: "Europe/Berlin"   # IANA timezone — used for on-device clock display
+
+  monday: Monday
+  tuesday: Tuesday
+  wednesday: Wednesday
+  thursday: Thursday
+  friday: Friday
+  saturday: Saturday
+  sunday: Sunday
+
+  jan: January
+  feb: February
+  mar: March
+  apr: April
+  may: May
+  jun: June
+  jul: July
+  aug: August
+  sept: September
+  oct: October
+  nov: November
+  dec: December
