@@ -233,10 +233,6 @@ script:
     then:
       - lambda: |-
           const ChakraInfo& ci = ChakraAnalyser::get_info(id(chakra_index));
-          char rgb[32];
-          snprintf(rgb, sizeof(rgb), "[%d, %d, %d]", (int)ci.r, (int)ci.g, (int)ci.b);
-          char bri[8];
-          snprintf(bri, sizeof(bri), "%d", id(chakra_light_bri));
           id(chakra_ha_r) = (int)ci.r;
           id(chakra_ha_g) = (int)ci.g;
           id(chakra_ha_b) = (int)ci.b;
@@ -1719,7 +1715,7 @@ display:
           it.printf(160, 30, id(icon_font_80), id(lime), TextAlign::TOP_CENTER, "\U000F0617");
           it.printf(160, 108, id(my_font3), id(white), TextAlign::TOP_CENTER, "Sound Healing");
           it.printf(160, 140, id(my_font3), id(white), TextAlign::TOP_CENTER, "ASSISTANT");
-          it.printf(160, 180, id(my_font), id(lime), TextAlign::TOP_CENTER, "Initializing sound senses...");
+          it.printf(160, 180, id(my_font), id(lime), TextAlign::TOP_CENTER, "Baking new healing features...");
           it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
           it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
       - id: idle_page
@@ -1747,8 +1743,8 @@ display:
           it.filled_rectangle(0, 128, 320, 1, Color(200,200,200));
           // ── Row 1: Temp | Lamp | Chakra ──
           it.printf(16, 42, id(icon_font_80), id(ha_blue), "\U000F050F");
-          it.printf(53, 82, id(my_font16), Color(100,100,100), TextAlign::CENTER, "%.1f\xC2\xB0C", id(s3temp).state);
-          it.printf(53, 98, id(my_font16), Color(100,100,100), TextAlign::CENTER, "%.0f%%", id(s3humidity).state);
+          it.printf(53, 82, id(my_font16), id(ha_blue), TextAlign::CENTER, "%.1f\xC2\xB0C", id(s3temp).state);
+          it.printf(53, 98, id(my_font16), id(ha_blue), TextAlign::CENTER, "%.0f%%", id(s3humidity).state);
           {
             bool lamp_on = id(ha_light_entity_state).state == "on";
             Color lc = lamp_on
@@ -1777,7 +1773,7 @@ display:
       - id: clock_page
         lambda: |-
           it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
-          const char *days[] {"${sunday}","${monday}","${tuesday}","${wednesday}","${thursday}","${friday}","${saturday}"};
+          static const char *days[] {"${sunday}","${monday}","${tuesday}","${wednesday}","${thursday}","${friday}","${saturday}"};
           it.printf(160, 8, id(my_font5), light_blue, TextAlign::TOP_CENTER, "%s", days[id(ha_time).now().day_of_week - 1]);
           if(id(time_display_format).state == "24 Hr") {
             it.strftime(160, 35, id(my_font2), id(white), TextAlign::TOP_CENTER, "%H:%M:%S", id(ha_time).now());
@@ -2283,6 +2279,35 @@ display:
           it.printf(165, 137, id(my_font5), yellow, TextAlign::LEFT, "%.0f%%", id(battery_percent).state);
           it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
           it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: temp_humi_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(25, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(71, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(116, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(162, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(208, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(253, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(297, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "TEMPERATURE & HUMIDITY");
+          it.filled_rectangle(160, 40, 1, 178, Color(200,200,200));
+          // Left: Temperature
+          it.printf(80, 55, id(icon_font_80), id(ha_blue), TextAlign::TOP_CENTER, "\U000F050F");
+          it.printf(80, 145, id(my_font4), id(ha_blue), TextAlign::TOP_CENTER, "%.1f\xC2\xB0""C", id(s3temp).state);
+          // Right: Humidity
+          it.printf(240, 55, id(icon_font_80), id(ha_blue), TextAlign::TOP_CENTER, "\U000F058E");
+          it.printf(240, 145, id(my_font4), id(ha_blue), TextAlign::TOP_CENTER, "%.0f%%", id(s3humidity).state);
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
       - id: chakra_set_page
         lambda: |-
           it.fill(id(display_bg));
@@ -2379,7 +2404,7 @@ display:
       - id: saver_page
         lambda: |-
           it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
-          const char *days[] {"${sunday}","${monday}","${tuesday}","${wednesday}","${thursday}","${friday}","${saturday}"};
+          static const char *days[] {"${sunday}","${monday}","${tuesday}","${wednesday}","${thursday}","${friday}","${saturday}"};
           it.printf(160, 8, id(my_font5), light_blue, TextAlign::TOP_CENTER, "%s", days[id(ha_time).now().day_of_week - 1]);
           if(id(time_display_format).state == "24 Hr") {
             it.strftime(160, 35, id(my_font2), id(white), TextAlign::TOP_CENTER, "%H:%M:%S", id(ha_time).now());
@@ -2543,6 +2568,7 @@ binary_sensor:
     pages:
       - idle_page
       - info_page
+      - temp_humi_page
       - lights_page
       - media_page
       - device_set_page
@@ -2568,6 +2594,7 @@ binary_sensor:
     pages:
       - idle_page
       - info_page
+      - temp_humi_page
       - lights_page
       - media_page
       - device_set_page
@@ -2593,6 +2620,7 @@ binary_sensor:
     pages:
       - idle_page
       - info_page
+      - temp_humi_page
       - lights_page
       - media_page
       - device_set_page
@@ -2618,6 +2646,7 @@ binary_sensor:
     pages:
       - idle_page
       - info_page
+      - temp_humi_page
       - lights_page
       - media_page
       - device_set_page
@@ -2647,6 +2676,7 @@ binary_sensor:
     pages:
       - idle_page
       - info_page
+      - temp_humi_page
       - lights_page
       - media_page
       - device_set_page
@@ -2672,6 +2702,7 @@ binary_sensor:
     pages:
       - idle_page
       - info_page
+      - temp_humi_page
       - lights_page
       - media_page
       - device_set_page
@@ -2806,7 +2837,7 @@ binary_sensor:
         - component.update: s3_box_lcd
 
   # ── Idle page grid (2x3) ──
-  # Temp cell → info_page
+  # Temp cell → temp_humi_page
   - platform: touchscreen
     page_id: idle_page
     id: control_1
@@ -2819,7 +2850,23 @@ binary_sensor:
       min_length: 10ms
       max_length: 500ms
       then:
-        - display.page.show: info_page
+        - display.page.show: temp_humi_page
+        - component.update: s3_box_lcd
+
+  # Temp/Humi page → back to idle
+  - platform: touchscreen
+    page_id: temp_humi_page
+    id: temp_humi_back
+    internal: true
+    x_min: 0
+    x_max: 319
+    y_min: 37
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: idle_page
         - component.update: s3_box_lcd
 
   # Lamp cell → lights_page

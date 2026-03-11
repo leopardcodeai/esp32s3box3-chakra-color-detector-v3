@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tag-release:
+    name: Semantic version tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next semver tag
+        id: semver
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          MAJOR=$(echo "$LAST_TAG" | cut -d. -f1 | tr -d v)
+          MINOR=$(echo "$LAST_TAG" | cut -d. -f2)
+          PATCH=$(echo "$LAST_TAG" | cut -d. -f3)
+          MSG=$(git log -1 --format="%s")
+          if echo "$MSG" | grep -qE '^feat!:|BREAKING CHANGE'; then
+            MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0
+          elif echo "$MSG" | grep -q '^feat:'; then
+            MINOR=$((MINOR+1)); PATCH=0
+          elif echo "$MSG" | grep -q '^fix:'; then
+            PATCH=$((PATCH+1))
+          else
+            echo "No semver bump (chore/docs/style). Skipping tag."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tag=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Push tag
+        if: steps.semver.outputs.skip == 'false'
+        run: |
+          TAG="${{ steps.semver.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "🏷️ Released $TAG"
