@@ -2,85 +2,108 @@
 
 ESPHome firmware for the **Espressif ESP32-S3-BOX-3** with Sensor Dock, built on top of the [BigBobbas custom config](https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome). Extends the original with a **Chakra Frequency Analyser** page that listens to the built-in MEMS microphones, detects dominant singing-bowl frequencies via FFT, maps them to the 7 chakras, and pushes the result to Home Assistant.
 
-### v3 — AWS Bedrock Integration
+### v3.1 — Raw Audio Streaming + Multi-VM Pipeline
 
-The device now supports an **AWS Bedrock multi-agent pipeline** for intelligent chakra-to-light mapping. When the cloud icon (☁) in the header bar is active (green), detected frequencies are sent to AWS Bedrock's **ChakraMaster** supervisor agent, which orchestrates sub-agents (AcousticAnalyzer + SpiritualGuide) to analyse the frequency and set the HA light via Lambda. When the cloud icon is off (white), the local ESP32 pipeline controls the light directly.
+The device streams **raw PCM audio** (16 kHz, 16-bit, mono) to a central relay VM. The relay runs its own FFT + chakra detection (identical algorithm to the on-device C++ version) and broadcasts results via **Server-Sent Events (SSE)**. Any number of VMs can subscribe — each running a lightweight listener that controls its local HA light in real time.
 
 ```
-ESP32 Mic → FFT → Frequency
-                      │
-         ┌────────────┴────────────┐
-         │ ☁ OFF                   │ ☁ ON
-         ▼                         ▼
-    ESP32 → HA               ESP32 → Relay → AWS Bedrock
-    (direct, instant)        ChakraMaster → Lambda → HA
+ESP32 Mic → Raw PCM
+                 │
+    ┌────────────┴────────────┐
+    │ ☁ OFF                   │ ☁ ON
+    ▼                         ▼
+ ESP32 FFT → HA          ESP32 → Relay → FFT → SSE broadcast
+ (local, instant)                   │        │
+                                    │    ┌───┴──────────┐
+                                    │    │ VM-1 (HA #1) │ ← chakra_listener.py
+                                    │    │ VM-2 (HA #2) │ ← chakra_listener.py
+                                    │    │ VM-N (HA #N) │ ← ...
+                                    │    └──────────────┘
+                                    ▼
+                              AWS Bedrock
+                              (parallel)
 ```
 
 ---
 
-## AWS Bedrock Pipeline (☁ ON mode)
+## Audio Streaming Pipeline (☁ ON mode)
 
-When the cloud icon is active, frequencies flow through a multi-agent AI pipeline:
+When the cloud icon is active, the ESP32 streams raw audio to the relay hub:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    ESP32-S3-BOX-3                            │
 │                                                             │
-│  ┌─────────┐    ┌──────────┐    ┌────────────────────┐     │
-│  │ ES7210  │───▶│ FFT/1024 │───▶│ Chakra Detection   │     │
-│  │ MEMS Mic│    │ (on-chip)│    │ freq → chakra idx  │     │
-│  └─────────┘    └──────────┘    └────────┬───────────┘     │
-│       ▲                                  │                  │
-│       │ (parallel)                       │ HTTP POST        │
-│  ┌────┴─────────┐                        │ every 3s         │
-│  │ Voice Assist │                        │ {freq, idx}      │
-│  │ (wake word   │                        │                  │
-│  │  always on)  │                        │                  │
-│  └──────────────┘                        │                  │
-└──────────────────────────────────────────┼──────────────────┘
-                                           │
-                                           ▼
-                              ┌────────────────────────┐
-                              │  Cloudflare Tunnel     │
-                              │  (trycloudflare.com)   │
-                              └────────────┬───────────┘
-                                           │
-                                           ▼
-                              ┌────────────────────────┐
-                              │  VM Relay (port 8765)  │
-                              │  /aws/chakra endpoint  │
-                              │  192.168.64.9          │
-                              └────────────┬───────────┘
-                                           │ boto3
-                                           ▼
-                    ┌──────────────────────────────────────────┐
-                    │           AWS Bedrock (eu-central-1)     │
-                    │                                          │
-                    │  ┌──────────────────────────────────┐   │
-                    │  │      ChakraMaster (Supervisor)   │   │
-                    │  │      Nova Pro · FEFWNRBPIQ       │   │
-                    │  └──────────┬───────────┬───────────┘   │
-                    │             │           │                │
-                    │    ┌────────▼──┐  ┌─────▼──────────┐   │
-                    │    │ Acoustic  │  │  Spiritual     │   │
-                    │    │ Analyzer  │  │  Guide         │   │
-                    │    │ ETLPAAENIN│  │  G5LBNHM7EQ   │   │
-                    │    └────┬──────┘  └────────────────┘   │
-                    │         │                               │
-                    │    ┌────▼──────────────────────────┐   │
-                    │    │  Lambda: ChakraActionHandler  │   │
-                    │    │  freq → chakra → RGB → HA call│   │
-                    │    │  + CloudWatch metrics emit    │   │
-                    │    └────┬──────────────────────────┘   │
-                    └─────────┼──────────────────────────────┘
-                              │
-                              ▼
-                 ┌────────────────────────────┐
-                 │  Cloudflare → VM Relay     │
-                 │  → Tailscale (100.x.x.x)  │
-                 │  → Home Assistant          │
-                 │  → light.turn_on (RGB)     │
-                 └────────────────────────────┘
+│  ┌─────────┐    ┌────────────────────────────────────┐     │
+│  │ ES7210  │───▶│ aws_audio_streamer.h               │     │
+│  │ MEMS Mic│    │ Double-buffered PCM → HTTP POST    │     │
+│  │ 16kHz   │    │ 4096 samples/chunk (~256 ms)       │     │
+│  └─────────┘    │ FreeRTOS background task (core 0)  │     │
+│       ▲         └────────────────┬───────────────────┘     │
+│       │ (parallel)               │ POST /aws/audio         │
+│  ┌────┴─────────┐                │ Content-Type:           │
+│  │ Voice Assist │                │  application/octet-     │
+│  │ (wake word   │                │  stream (raw int16 LE)  │
+│  │  always on)  │                │                         │
+│  └──────────────┘                │                         │
+└──────────────────────────────────┼─────────────────────────┘
+                                   │
+                                   ▼
+                      ┌────────────────────────┐
+                      │  Cloudflare Tunnel     │
+                      │  (trycloudflare.com)   │
+                      └────────────┬───────────┘
+                                   │
+                                   ▼
+                      ┌────────────────────────────────────┐
+                      │  Audio FFT Relay (port 8765)       │
+                      │  audio_fft_relay.py                │
+                      │                                    │
+                      │  POST /aws/audio    ← raw PCM in   │
+                      │  POST /aws/chakra   ← legacy JSON  │
+                      │  GET  /aws/audio/live → SSE chakra │
+                      │  GET  /aws/audio/raw  → SSE PCM    │
+                      │  GET  /health         → status     │
+                      │                                    │
+                      │  numpy FFT (512-pt Hann + HPS)     │
+                      │  Identical to on-device algorithm   │
+                      └──────┬─────────────┬───────────────┘
+                             │             │
+                    ┌────────▼──┐    ┌─────▼───────────────┐
+                    │ Bedrock   │    │  SSE Broadcast      │
+                    │ (boto3)   │    │                     │
+                    │ ChakraMas │    │  VM-1: listener.py  │
+                    │ ter agent │    │  VM-2: listener.py  │
+                    │ → Lambda  │    │  VM-N: ...          │
+                    │ → CW met. │    │                     │
+                    └───────────┘    │  Each subscribes to │
+                                    │  /aws/audio/live    │
+                                    │  → HA light.turn_on │
+                                    └─────────────────────┘
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/aws/audio` | Raw PCM (int16 LE, 16 kHz) from ESP32 |
+| `POST` | `/aws/chakra` | Legacy JSON `{frequency, chakra_index}` |
+| `GET` | `/aws/audio/live` | SSE stream — chakra detections (JSON) |
+| `GET` | `/aws/audio/raw` | SSE stream — raw PCM as base64 (for own FFT) |
+| `GET` | `/health` | Status + subscriber count |
+
+### SSE Event Format (`/aws/audio/live`)
+
+```json
+{
+  "chakra_index": 3,
+  "chakra_name": "Heart",
+  "frequency": 343.2,
+  "signal_db": -22.5,
+  "color": "#00CC00",
+  "r": 0, "g": 204, "b": 0,
+  "timestamp": 1741783200.5
+}
 ```
 
 ### CloudWatch Metrics
@@ -171,7 +194,10 @@ The ESP32-S3 has four strapping pins that affect boot behavior. All are used by 
 |------|---------|
 | `esp32s3box3.yaml` | Main ESPHome configuration (~4 400 lines) |
 | `device_config.yaml` | **All user-configurable settings** — edit this first |
-| `chakra_component.h` | Self-contained C++ FFT analyser (1 024-pt Cooley-Tukey) |
+| `chakra_component.h` | Self-contained C++ FFT analyser (512-pt Cooley-Tukey) |
+| `aws_audio_streamer.h` | Double-buffered PCM streamer — FreeRTOS background HTTP POST |
+| `vm_scripts/audio_fft_relay.py` | **Relay hub** — receives PCM, runs FFT, SSE broadcast + Bedrock |
+| `vm_scripts/chakra_listener.py` | **HA listener** — subscribes to SSE, controls local HA light |
 | `secrets.yaml` | Wi-Fi credentials — **never commit real values** |
 | `secrets.example.yaml` | CI placeholder — checked in |
 | `tools/pin_check.py` | GPIO conflict + strapping-pin validator |
@@ -205,6 +231,39 @@ A dedicated **Chakra** page (reachable from the Settings nav) replaces the Voice
 ### Sensitivity tuning
 
 The Chakra page has **+/−** touch buttons to adjust the detection threshold live. The default is `0.10` (10 % of peak bin energy). Increase it if background noise triggers false positives; decrease it for quieter bowls.
+
+---
+
+## VM Deployment
+
+### Relay Hub (central VM)
+
+```bash
+pip install numpy boto3
+python3 vm_scripts/audio_fft_relay.py --port 8765
+# Optional: --no-bedrock to disable AWS agent invocation
+```
+
+### Listener (any VM with Home Assistant)
+
+```bash
+pip install requests sseclient-py
+python3 vm_scripts/chakra_listener.py \
+  --relay-url http://<RELAY_IP>:8765 \
+  --ha-token YOUR_LONG_LIVED_TOKEN \
+  --light light.living_room
+```
+
+Or via environment variables:
+
+```bash
+export RELAY_URL=http://192.168.64.9:8765
+export HA_TOKEN=your_token_here
+export LIGHT_ENTITY=light.living_room
+python3 vm_scripts/chakra_listener.py
+```
+
+Both scripts include systemd unit examples in their file headers.
 
 ---
 
