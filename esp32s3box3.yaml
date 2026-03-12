@@ -14,6 +14,7 @@ substitutions:
 esphome:
   includes:
     - chakra_component.h
+    - aws_audio_streamer.h
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2025.2.0
@@ -22,6 +23,7 @@ esphome:
     then:
       - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
       - lambda: ChakraAnalyser::init();
+      - lambda: AwsAudioStreamer::init("${aws_relay_url}/aws/audio");
       - display.page.show: loading_page
       - component.update: s3_box_lcd
       - script.execute: saver_enabled
@@ -732,10 +734,14 @@ switch:
     optimistic: true
     restore_mode: ALWAYS_ON
     on_turn_on:
-      - lambda: id(aws_mode_active) = true;
+      - lambda: |-
+          id(aws_mode_active) = true;
+          AwsAudioStreamer::set_enabled(true);
       - component.update: s3_box_lcd
     on_turn_off:
-      - lambda: id(aws_mode_active) = false;
+      - lambda: |-
+          id(aws_mode_active) = false;
+          AwsAudioStreamer::set_enabled(false);
       - component.update: s3_box_lcd
   # ─── End AWS Mode Switch ───────────────────────────────────────
   - platform: gpio
@@ -1163,9 +1169,13 @@ microphone:
     adc_type: external
     on_data:
       - lambda: |-
-          if (!id(chakra_mode_active)) return;
           const int16_t* samples = reinterpret_cast<const int16_t*>(x.data());
           size_t sample_count = x.size() / 2;
+          // ── AWS: stream raw PCM when enabled (runs even without chakra mode) ──
+          if (id(aws_mode_active)) {
+            AwsAudioStreamer::push_samples(samples, sample_count);
+          }
+          if (!id(chakra_mode_active)) return;
           // Always update fill progress (runs even between FFT frames)
           id(fft_accum_fill) = ChakraAnalyser::accum_fill;
           if (ChakraAnalyser::push_samples(samples, sample_count,
@@ -1242,14 +1252,6 @@ microphone:
             id(fft_bar_14) = ChakraAnalyser::bar_magnitudes[14];
             id(fft_bar_15) = ChakraAnalyser::bar_magnitudes[15];
             id(chakra_fft_ready) = true;  // signal main loop: new data ready
-            // ── AWS: send frequency to Bedrock if enabled ──
-            if (id(aws_mode_active) && id(wifi_connection) && new_chakra >= 0) {
-              uint32_t now_ms = millis();
-              if (now_ms - id(aws_last_send_ms) > 3000) {
-                id(aws_last_send_ms) = now_ms;
-                id(send_frequency_to_aws).execute();
-              }
-            }
           }
 
 speaker:

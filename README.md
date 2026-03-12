@@ -18,6 +18,85 @@ ESP32 Mic → FFT → Frequency
 
 ---
 
+## AWS Bedrock Pipeline (☁ ON mode)
+
+When the cloud icon is active, frequencies flow through a multi-agent AI pipeline:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ESP32-S3-BOX-3                            │
+│                                                             │
+│  ┌─────────┐    ┌──────────┐    ┌────────────────────┐     │
+│  │ ES7210  │───▶│ FFT/1024 │───▶│ Chakra Detection   │     │
+│  │ MEMS Mic│    │ (on-chip)│    │ freq → chakra idx  │     │
+│  └─────────┘    └──────────┘    └────────┬───────────┘     │
+│       ▲                                  │                  │
+│       │ (parallel)                       │ HTTP POST        │
+│  ┌────┴─────────┐                        │ every 3s         │
+│  │ Voice Assist │                        │ {freq, idx}      │
+│  │ (wake word   │                        │                  │
+│  │  always on)  │                        │                  │
+│  └──────────────┘                        │                  │
+└──────────────────────────────────────────┼──────────────────┘
+                                           │
+                                           ▼
+                              ┌────────────────────────┐
+                              │  Cloudflare Tunnel     │
+                              │  (trycloudflare.com)   │
+                              └────────────┬───────────┘
+                                           │
+                                           ▼
+                              ┌────────────────────────┐
+                              │  VM Relay (port 8765)  │
+                              │  /aws/chakra endpoint  │
+                              │  192.168.64.9          │
+                              └────────────┬───────────┘
+                                           │ boto3
+                                           ▼
+                    ┌──────────────────────────────────────────┐
+                    │           AWS Bedrock (eu-central-1)     │
+                    │                                          │
+                    │  ┌──────────────────────────────────┐   │
+                    │  │      ChakraMaster (Supervisor)   │   │
+                    │  │      Nova Pro · FEFWNRBPIQ       │   │
+                    │  └──────────┬───────────┬───────────┘   │
+                    │             │           │                │
+                    │    ┌────────▼──┐  ┌─────▼──────────┐   │
+                    │    │ Acoustic  │  │  Spiritual     │   │
+                    │    │ Analyzer  │  │  Guide         │   │
+                    │    │ ETLPAAENIN│  │  G5LBNHM7EQ   │   │
+                    │    └────┬──────┘  └────────────────┘   │
+                    │         │                               │
+                    │    ┌────▼──────────────────────────┐   │
+                    │    │  Lambda: ChakraActionHandler  │   │
+                    │    │  freq → chakra → RGB → HA call│   │
+                    │    │  + CloudWatch metrics emit    │   │
+                    │    └────┬──────────────────────────┘   │
+                    └─────────┼──────────────────────────────┘
+                              │
+                              ▼
+                 ┌────────────────────────────┐
+                 │  Cloudflare → VM Relay     │
+                 │  → Tailscale (100.x.x.x)  │
+                 │  → Home Assistant          │
+                 │  → light.turn_on (RGB)     │
+                 └────────────────────────────┘
+```
+
+### CloudWatch Metrics
+
+The Lambda emits custom metrics under namespace **`ChakraAnalyser`**, dimensioned by chakra name:
+
+| Metric | Description |
+|--------|-------------|
+| `ChakraActivation` | Count of detections per chakra |
+| `FrequencyDetected` | Detected frequency in Hz |
+| `ColorR` / `ColorG` / `ColorB` | RGB values sent to the light |
+
+View live in AWS Console → CloudWatch → Metrics → ChakraAnalyser.
+
+---
+
 ## Hardware
 
 ### ESP32-S3-BOX-3 Specifications
