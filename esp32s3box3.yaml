@@ -1,0 +1,3926 @@
+## ── User configuration is in device_config.yaml — edit that file, not here ──
+
+packages:
+  device_config: !include device_config.yaml
+
+substitutions:
+##### DO NOT CHANGE SUBSTITUTIONS BELOW THIS LINE ######
+#####      UNLESS YOU KNOW WHAT YOU ARE DOING     ######
+  font_glyphs: '&#@!"''%()+=,-_.:°/$€£¥?0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyzÀàÁáÂâÃãÄäĀāĂăÅåǺǻẠạĄąÆæǼǽĆćĈĉČčĊċÇçĎďĐđÐðÈèÉéÊêẼẽĚěËëĒēĔĕĖėẸẹĘęĜĝǦǧĞğĠġĢģĤĥĦħıÌìÍíÎîĨĩÏïĪīĬĭİỊịĮįȷĴĵĶķĸĹĺĽľĻļŁłĿŀŃńÑñŇňŅņƝɲŊŋŉÒòÓóÔôÕõÖöŌōŎŏŐőỌọǪǫØøǾǿŒœŔŕŘřŖŗŚśŜŝŠšŞşȘșẞßŤťŢţȚțŦŧÞþÙùÚúÛûŨũÜüŪūŬŭŮůŰűỤụŲųẀẁẂẃŴŵẄẅỲỳÝýŶŷỸỹŸÿȲȳŹźŽžŻżĲĳƏə'
+
+############# END OF SUBSTITUTIONS #################
+####################################################
+
+esphome:
+  includes:
+    - chakra_component.h
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.2.0
+  on_boot:
+    priority: 600
+    then:
+      - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+      - lambda: ChakraAnalyser::init();
+      - display.page.show: loading_page
+      - component.update: s3_box_lcd
+      - script.execute: saver_enabled
+      - lambda: id(time_remaining_0).publish_state ("0:00:00");
+      - if:
+          condition:
+            switch.is_on: output_audio
+          then:
+            media_player.volume_set:
+              id: speaker_media_player
+              volume: 0
+  project:
+    name: "BigBobbas.s3box"
+    version: "2024.09.02"
+esp32:
+  board: esp32s3box
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+api:
+  on_client_connected:
+    - script.stop: mark_api_disconnected
+    - lambda: |-
+        id(api_connection) = true;
+    - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+    - component.update: s3_box_lcd
+    - script.execute: saver_enabled
+  on_client_disconnected:
+    - script.execute: mark_api_disconnected
+
+ota:
+  - platform: esphome
+    on_begin:
+      - lambda: id(led).turn_on().set_brightness(1.0).set_transition_length(0).perform();
+                id(led).loop();
+      - display.page.show: ota_page
+      - component.update: s3_box_lcd
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    text_sensor: WARN
+    component: ERROR
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${name}
+    password: s3box123
+  on_connect:
+    - lambda: |-
+        id(wifi_connection) = true;
+    - display.page.show: idle_page
+    - component.update: s3_box_lcd
+    - switch.turn_on: speaker_enable
+  on_disconnect:
+    - lambda: |-
+        id(wifi_connection) = false;
+
+captive_portal:
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: ${timezone}
+
+interval:
+  - interval: 150ms
+    # Chakra display + HA updates — runs on main loop (thread-safe with SPI/API)
+    then:
+      - lambda: |-
+          if (!id(chakra_mode_active)) return;
+          // Display refresh — always update so progress bars animate smoothly
+          if (id(s3_box_lcd).get_active_page() == id(chakra_page))
+            id(s3_box_lcd).update();
+          // HA publish + light only when new FFT data is ready
+          if (!id(chakra_fft_ready)) return;
+          id(chakra_fft_ready) = false;
+          int cidx = id(chakra_index);
+          const ChakraInfo& ci = ChakraAnalyser::get_info(cidx);
+          id(chakra_active_name).publish_state(ci.name);
+          id(chakra_active_color).publish_state(ci.hex_color);
+          if (cidx >= 0 && cidx != id(last_sent_chakra)) {
+            id(last_sent_chakra) = cidx;
+            if (!id(aws_mode_active)) {
+              id(chakra_send_to_ha).execute();
+            }
+          }
+          if (cidx < 0) id(last_sent_chakra) = -2;
+  - interval: 30s
+    then:
+      - component.update: s3_box_lcd
+  # Clock page refresh every second so time ticks
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(s3_box_lcd).get_active_page() == id(clock_page) ||
+              id(s3_box_lcd).get_active_page() == id(idle_page))
+            id(s3_box_lcd).update();
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            - lambda: 'return { (id(api_connection) != true) };'
+          then:
+            - if:
+                condition:
+                  api.connected:
+                then:
+                  - lambda: "id(api_connection) = true;"
+          else:
+            - if:
+                condition:
+                  not:
+                    api.connected:
+                then:
+                  - lambda: "id(api_connection) = false;"
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            - lambda: 'return { (id(wifi_connection) != true) };'
+          then:
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - lambda: "id(wifi_connection) = true;"
+          else:
+            - if:
+                condition:
+                  not:
+                    wifi.connected:
+                then:
+                  - lambda: "id(wifi_connection) = false;"
+
+select:
+  - platform: template
+    entity_category: config
+    name: Wake word engine location
+    id: wake_word_engine_location
+    optimistic: true
+    restore_value: true
+    options:
+      - In Home Assistant
+      - On device
+    initial_option: On device
+    on_value:
+      - if:
+          condition:
+            lambda: return x == "In Home Assistant";
+          then:
+            - micro_wake_word.stop
+            - delay: 500ms
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start_continuous:
+            - text_sensor.template.publish:
+                id: wakeword_location
+                state: !lambda 'return "Home Assistant";'
+            - component.update: s3_box_lcd
+      - if:
+          condition:
+            lambda: return x == "On device";
+          then:
+            - text_sensor.template.publish:
+                id: wakeword_location
+                state: !lambda 'return "On Device";'
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop
+            - delay: 500ms
+            - micro_wake_word.start
+            - component.update: s3_box_lcd
+
+  - platform: template
+    entity_category: config
+    name: Time Format
+    id: time_format
+    optimistic: true
+    restore_value: true
+    options:
+      - 12 Hr
+      - 24 Hr
+    initial_option: 24 Hr
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: return x == "24 Hr";
+            then:
+              - text_sensor.template.publish:
+                  id: time_display_format
+                  state: !lambda 'return "24 Hr";'
+            else:
+              - text_sensor.template.publish:
+                  id: time_display_format
+                  state: !lambda 'return "12 Hr";'
+        - component.update: s3_box_lcd
+
+script:
+  # ─── Debounce HA API disconnect (prevents icon flicker on brief drops) ───
+  - id: mark_api_disconnected
+    mode: restart
+    then:
+      - delay: 5s
+      - if:
+          condition:
+            not:
+              api.connected:
+          then:
+            - lambda: "id(api_connection) = false;"
+  # ─── Chakra: send detection to HA light ──────────────────────
+  - id: chakra_send_to_ha
+    then:
+      - lambda: |-
+          const ChakraInfo& ci = ChakraAnalyser::get_info(id(chakra_index));
+          char rgb[32];
+          snprintf(rgb, sizeof(rgb), "[%d, %d, %d]", (int)ci.r, (int)ci.g, (int)ci.b);
+          char bri[8];
+          snprintf(bri, sizeof(bri), "%d", id(chakra_light_bri));
+          id(chakra_ha_r) = (int)ci.r;
+          id(chakra_ha_g) = (int)ci.g;
+          id(chakra_ha_b) = (int)ci.b;
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: light.${chakra_light_entity}
+          data_template:
+            brightness_pct: "{{ chakra_bri }}"
+            rgb_color: "{{ [r, g, b] }}"
+          variables:
+            chakra_bri: !lambda 'return std::to_string(id(chakra_light_bri));'
+            r: !lambda 'return std::to_string(id(chakra_ha_r));'
+            g: !lambda 'return std::to_string(id(chakra_ha_g));'
+            b: !lambda 'return std::to_string(id(chakra_ha_b));'
+  # ─── End Chakra script ────────────────────────────────────────
+  - id: start_voice_assistant
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_off: mute_switch
+              - lambda: return !id(chakra_mode_active);
+          then:
+            - if:
+                condition:
+                  lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                then:
+                  - lambda: id(va).set_use_wake_word(true);
+                  - voice_assistant.start_continuous:
+            - if:
+                condition:
+                  lambda: return id(wake_word_engine_location).state == "On device";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - micro_wake_word.start
+
+  - id: stop_voice_assistant
+    then:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - voice_assistant.stop:
+            - micro_wake_word.stop:
+
+  # ─── AWS: send detected frequency to Bedrock via relay ─────────
+  - id: send_frequency_to_aws
+    mode: single
+    then:
+      - http_request.post:
+          url: "${aws_relay_url}/aws/chakra"
+          request_headers:
+            Content-Type: "application/json"
+          json: |-
+            root["frequency"] = id(peak_freq_hz);
+            root["chakra_index"] = id(chakra_index);
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code == 200) {
+                    ESP_LOGI("aws", "Frequency %.0f Hz sent to AWS OK", id(peak_freq_hz));
+                  } else {
+                    ESP_LOGW("aws", "AWS relay returned %d", response->status_code);
+                  }
+  # ─── End AWS script ────────────────────────────────────────────
+
+  - id: set_volume
+    then:
+      - media_player.volume_set:
+          volume: !lambda return 0.5 + id(speaker_volume) * 0.05 ;
+
+  - id: saver_enabled
+    then:
+      - if:
+          condition:
+            switch.is_on: s_saver
+          then:
+            - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+            - delay: !lambda return id(s_saver_delay).state * 1000;
+            - lambda: id(led).turn_on().set_brightness(id(s_saver_brightness).state /100).perform();
+            - display.page.show: saver_page
+            - component.update: s3_box_lcd
+      - if:
+          condition:
+            - switch.is_on: s_saver_mode
+          then:
+            - delay: !lambda return id(s_saver_blank_delay).state * 1000;
+            - light.turn_off: led
+    mode: restart
+
+  - id: saver_enabled_manual
+    then:
+      - if:
+          condition:
+            - switch.is_on: s_saver
+          then:
+            - lambda: id(led).turn_on().set_brightness(id(s_saver_brightness).state /100).perform();
+            - display.page.show: saver_page
+            - component.update: s3_box_lcd
+      - if:
+          condition:
+            - switch.is_on: s_saver_mode
+          then:
+            - delay: !lambda return id(s_saver_blank_delay).state * 1000;
+            - light.turn_off: led
+            - component.update: s3_box_lcd
+    mode: restart
+
+  # - id: timer_started
+    # then:
+      # while:
+        # condition:
+          # switch.is_on: timer_ringing
+        # then:
+          # - voice_assistant.stop
+          # - delay: 150ms
+          # - media_player.speaker.play_on_device_media_file:
+              # media_file: wake_sound_file
+              # announcement: true
+          # - delay: 1s
+
+  - id: timer_started_external
+    then:
+      while:
+        condition:
+          switch.is_on: timer_ringing
+        then:
+          - homeassistant.service:
+              service: media_player.play_media
+              data:
+                entity_id: media_player.${external_media_player}
+                media_content_id: '${home_assistant_host}/local/sounds/timer_finished.mp3'
+                media_content_type: music
+          - delay: 1700ms
+
+  - id: timer_ending
+    then:
+      - wait_until:
+          - lambda: return (id(time_remaining_0).state == "0:00:10");
+      - script.execute: saver_enabled
+      - display.page.show: idle_page
+      - component.update: s3_box_lcd
+
+
+  - id: show_notification
+    then:
+      - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+      - display.page.show: notification_page
+      - component.update: s3_box_lcd
+      - delay: 10s
+      - display.page.show: idle_page
+      - script.execute: saver_enabled
+      - component.update: s3_box_lcd
+globals:
+  # ─── Chakra Analysis ───────────────────────────────────────────
+  - id: chakra_mode_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: chakra_transitioning
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: chakra_index
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: fft_bar_0
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_1
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_2
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_3
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_4
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_5
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_6
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_7
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_8
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_9
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_10
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_11
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_12
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_13
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_14
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: fft_bar_15
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: chakra_detection_threshold
+    type: float
+    restore_value: no
+    initial_value: '0.001'
+  - id: peak_freq_hz
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: signal_level_db
+    type: float
+    restore_value: no
+    initial_value: '-90'
+  - id: fft_accum_fill
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: last_sent_chakra
+    type: int
+    restore_value: no
+    initial_value: '-2'
+  - id: chakra_fft_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: chakra_light_bri
+    type: int
+    restore_value: yes
+    initial_value: '50'
+  - id: chakra_ha_r
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: chakra_ha_g
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: chakra_ha_b
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: chakra_hold_frames    # hold duration in FFT frames (~64ms each). Default 8 ≈ 512ms
+    type: int
+    restore_value: yes
+    initial_value: '8'
+  - id: chakra_hold_counter   # frames remaining before chakra may change
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: chakra_candidate      # candidate chakra index being evaluated
+    type: int
+    restore_value: no
+    initial_value: '-2'
+  - id: chakra_candidate_count  # consecutive frames candidate has been seen
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # ─── End Chakra ─────────────────────────────────────────────────
+  - id: wifi_connection
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: api_connection
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: mute_value
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: speaker_volume
+    type: int
+    restore_value: no
+    initial_value: '5'
+  - id: media_state
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: global_first_active_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: global_is_timer_active
+    type: bool
+    restore_value: false
+  - id: global_first_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: global_is_timer
+    type: bool
+    restore_value: false
+  - id: global_is_assisting
+    type: bool
+    restore_value: false
+  - id: previous_notification_text
+    type: std::string
+    initial_value: ""
+  # ─── AWS Bedrock Streaming ────────────────────────────────────
+  - id: aws_mode_active
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: aws_last_send_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+number:
+  - id: s_saver_delay
+    platform: template
+    name: "Scr/save delay"
+    icon: 'mdi:sleep'
+    entity_category: config
+    unit_of_measurement: 'secs'
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    step: 5
+    min_value: 10
+    max_value: 999999
+    on_value:
+      - component.update: s3_box_lcd
+      - component.update: s_saver_delay
+      - script.execute: saver_enabled
+
+  - id: s_saver_blank_delay
+    platform: template
+    name: "Scr/off delay"
+    icon: 'mdi:monitor-off'
+    entity_category: config
+    unit_of_measurement: 'secs'
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    step: 5
+    min_value: 10
+    max_value: 999999
+    on_value:
+      - component.update: s_saver_blank_delay
+      - script.execute: saver_enabled
+      - component.update: s3_box_lcd
+
+  - id: s_saver_brightness
+    platform: template
+    name: "Scr/save Brightness"
+    icon: 'mdi:sleep'
+    entity_category: config
+    unit_of_measurement: '%'
+    optimistic: true
+    restore_value: true
+    initial_value: ${saver_brightness}
+    step: 5
+    min_value: 20
+    max_value: 100
+    on_value:
+      - component.update: s_saver_brightness
+      - script.execute: saver_enabled
+      - component.update: s3_box_lcd
+
+  - id: s_default_brightness
+    platform: template
+    name: "Default Brightness"
+    icon: 'mdi:monitor'
+    entity_category: config
+    unit_of_measurement: '%'
+    optimistic: true
+    restore_value: true
+    initial_value: ${default_brightness}
+    step: 5
+    min_value: 20
+    max_value: 100
+    on_value:
+      - component.update: s_default_brightness
+      - script.execute: saver_enabled
+      - component.update: s3_box_lcd
+
+  - id: temp_offset
+    platform: template
+    name: "Temperature Offset"
+    icon: 'mdi:thermometer-plus'
+    entity_category: config
+    unit_of_measurement: '°C'
+    optimistic: true
+    restore_value: true
+    initial_value: -10
+    step: 0.5
+    min_value: -20
+    max_value: 20
+    on_value:
+      - component.update: s3_box_lcd
+button:
+  - platform: restart
+    id: reboot
+    name: "Reboot"
+    entity_category: diagnostic
+
+switch:
+  # ─── Chakra Mode Switch ──────────────────────────────────────
+  - platform: template
+    name: Chakra Mode
+    id: chakra_mode_switch
+    icon: mdi:sine-wave
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      # 0. Guard: mark transition in progress
+      - lambda: id(chakra_transitioning) = true;
+      # 1. Stop VA + wake-word first — they own box_mic
+      - script.execute: stop_voice_assistant
+      # 2. Fixed delay: let I2S fully release
+      - delay: 800ms
+      # 3. Now safe to take the mic for chakra
+      - lambda: |-
+          id(chakra_mode_active) = true;
+          id(box_mic)->start();
+          id(chakra_transitioning) = false;
+      - if:
+          condition:
+            lambda: 'return id(s3_box_lcd).get_active_page() != id(chakra_page);'
+          then:
+            - display.page.show: chakra_page
+            - component.update: s3_box_lcd
+    on_turn_off:
+      # 0. Guard: mark transition in progress
+      - lambda: id(chakra_transitioning) = true;
+      # 1. Clear guard flag so on_data callbacks bail out
+      - lambda: |-
+          id(chakra_mode_active) = false;
+          id(chakra_index) = -1;
+          id(chakra_active_name).publish_state("None");
+          id(chakra_active_color).publish_state("#FFFFFF");
+      # 2. Let any in-flight on_data callback finish, then release mic
+      - delay: 100ms
+      - lambda: id(box_mic)->stop();
+      - delay: 500ms
+      - lambda: id(chakra_transitioning) = false;
+      - script.execute: start_voice_assistant
+  # ─── End Chakra Mode Switch ──────────────────────────────────
+  # ─── AWS Bedrock Mode Switch ───────────────────────────────────
+  - platform: template
+    name: AWS Bedrock
+    id: aws_mode_switch
+    icon: mdi:cloud
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    on_turn_on:
+      - lambda: id(aws_mode_active) = true;
+      - component.update: s3_box_lcd
+    on_turn_off:
+      - lambda: id(aws_mode_active) = false;
+      - component.update: s3_box_lcd
+  # ─── End AWS Mode Switch ───────────────────────────────────────
+  - platform: gpio
+    name: Speaker Enable
+    id: speaker_enable
+    pin: 
+      number: GPIO46
+      ignore_strapping_warning: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: template
+    name: Display conversation
+    id: display_conversation
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    icon: 'mdi:chat'
+
+  - platform: template
+    name: Output audio externally
+    id: output_audio
+    icon: 'mdi:volume-off'
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      media_player.volume_set:
+        id: speaker_media_player
+        volume: 0
+    on_turn_off:
+      media_player.volume_set:
+        id: speaker_media_player
+        volume: 1.0
+
+  - platform: template
+    name: Mute
+    id: mute_switch
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      then:
+        - voice_assistant.stop
+        - micro_wake_word.stop
+    on_turn_off:
+      - if:
+          condition:
+            not:
+              - voice_assistant.is_running
+          then:
+            - if:
+                condition:
+                  lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                then:
+                  - lambda: id(va).set_use_wake_word(true);
+                  - delay: 50ms
+                  - voice_assistant.start_continuous
+            - if:
+                condition:
+                  lambda: return id(wake_word_engine_location).state == "On device";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - micro_wake_word.start
+            - component.update: s3_box_lcd
+
+  - platform: template
+    id: media_mute
+    optimistic: true
+    on_turn_on:
+      media_player.volume_set:
+        id: speaker_media_player
+        volume: 0
+    on_turn_off:
+      media_player.volume_set:
+        id: speaker_media_player
+        volume: 1.0
+
+  - platform: template
+    id: s_saver
+    name: Scr/save enable
+    icon: mdi:sleep
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+  - platform: template
+    id: s_saver_mode
+    name: Scr/off enable
+    icon: 'mdi:monitor-off'
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+  - platform: template # remove for no sensor version
+    id: s_saver_presc
+    name: Screen wake on motion
+    icon: 'mdi:motion-sensor'
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+    on_turn_off:
+      # Turn off the repeat mode and disable the pause between playlist items
+      - lambda: |-
+              id(speaker_media_player)
+                ->make_call()
+                .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+                .set_announcement(true)
+                .perform();
+              id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      # Stop playing the alarm
+      - media_player.stop:
+          announcement: true
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start
+          else:
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start
+    on_turn_on:
+      - lambda: id(va).set_use_wake_word(false);
+      - voice_assistant.stop:
+      - micro_wake_word.stop:
+      - delay: 150ms
+      # Turn on the repeat mode and pause for 1000 ms between playlist items/repeats
+      - lambda: id(led).turn_on().set_brightness(1.0).perform();
+      - lambda: |-
+            id(speaker_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+              .set_announcement(true)
+              .perform();
+            id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+
+  - platform: template
+    id: wake_sound
+    name: Play wake sound
+    icon: mdi:music
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    id: mute_response_switch
+    name: Mute Responses
+    icon: mdi:chat-sleep
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    id: ext_media_mute
+    icon: 'mdi:volume-off'
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      then:
+        - homeassistant.service:
+            service: media_player.volume_mute
+            data:
+              entity_id: media_player.${external_media_player}
+    on_turn_off:
+      - homeassistant.service:
+          service: media_player.volume_mute
+          data:
+            entity_id: media_player.${external_media_player}
+
+output:
+  - platform: ledc
+    pin: GPIO47
+    id: backlight_output
+
+light:
+  - platform: monochromatic
+    id: led
+    name: LCD Backlight
+    entity_category: config
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 50ms
+
+sensor:
+  - platform: aht10 # remove for no sensor version
+    i2c_id: bus_b
+    variant: AHT20
+    temperature:
+      name: "S3 Temperature"
+      id: s3temp
+      accuracy_decimals: 1
+      filters:
+        - lambda: return x + id(temp_offset).state;
+        - round: 1
+    humidity:
+      name: "S3 Humidity"
+      id: s3humidity
+      accuracy_decimals: 1
+      filters:
+        - round: 1
+    update_interval: 60s
+
+  - platform: adc # remove for no sensor version
+    pin: GPIO10
+    id: battery_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: "voltage"
+    entity_category: "diagnostic"
+    disabled_by_default: true
+    update_interval: 30s
+    attenuation: auto
+    filters:
+      - multiply: 4.11
+
+  - platform: copy # remove for no sensor version
+    id: battery_percent
+    source_id: battery_voltage
+    name: "Battery level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: "battery"
+    entity_category: "diagnostic"
+    filters:
+      - lambda: return (x - 2.7) / (4.2 - 2.7) * 100;
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+  - platform: uptime
+    id: up_sens
+    on_value:
+      - lambda: |-
+          int seconds = id(up_sens).state;
+          int days = seconds / 86400;
+          int hours = seconds / 3600;
+          int minutes = (seconds % 3600) / 60;
+          seconds %= 60;
+          id(up_sens_text).publish_state(str_sprintf("%03d:%02d:%02d:%02d", days, hours, minutes, seconds));
+    update_interval: 30s
+
+  - platform: wifi_signal
+    name: "WiFi db"
+    id: wifi_signal_db
+    update_interval: 30s
+
+  - platform: copy
+    source_id: wifi_signal_db
+    name: "WiFi Signal"
+    id: wifi_percent
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: "diagnostic"
+    device_class: ""
+
+text_sensor:
+  # ─── Chakra text sensors ──────────────────────────────────────
+  - platform: template
+    id: chakra_active_name
+    name: Chakra Name
+    icon: mdi:circle-outline
+  - platform: template
+    id: chakra_active_color
+    name: Chakra Color
+    icon: mdi:palette
+  # ─── End Chakra text sensors ──────────────────────────────────
+  - id: text_request
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_request).state.length()>32) {
+          std::string name = id(text_request).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          id(text_request).state = (truncated+"...").c_str();
+        }
+
+  - id: text_response
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_response).state.length()>32) {
+          std::string name = id(text_response).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          id(text_response).state = (truncated+"...").c_str();
+        }
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+      id: ip_addr
+      entity_category: "diagnostic"
+    ssid:
+      id: connected_ssid
+      name: SSID
+      entity_category: "diagnostic"
+    bssid:
+      id: connected_bssid
+      name: BSSID
+      entity_category: "diagnostic"
+    mac_address:
+      id: device_mac
+
+  - platform: template
+    id: up_sens_text
+    name: Device uptime
+    entity_category: "diagnostic"
+    icon: mdi:clock
+
+  - platform: template
+    id: wakeword_location
+
+  - platform: template
+    id: time_remaining_0
+    name: Timer
+    icon: mdi:clock
+
+  - platform: template
+    id: time_remaining_1
+
+  - platform: template
+    id: time_display_format
+    update_interval: never
+  - platform: homeassistant
+    entity_id: media_player.${external_media_player}
+    id: ha_media_status
+    on_value:
+      component.update: s3_box_lcd
+
+  - platform: homeassistant
+    entity_id: media_player.${external_media_player}
+    id: ha_media_title
+    attribute: media_content_id
+    on_value:
+      component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ha_light_entity_state
+    entity_id: light.${chakra_light_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ha_light_rgb_color
+    entity_id: light.${chakra_light_entity}
+    attribute: rgb_color
+    on_value:
+      then:
+        - lambda: |-
+            std::string s = x;
+            int r = 0, g = 0, b = 0;
+            if (sscanf(s.c_str(), "(%d, %d, %d)", &r, &g, &b) == 3 ||
+                sscanf(s.c_str(), "[%d, %d, %d]", &r, &g, &b) == 3) {
+              id(chakra_ha_r) = r;
+              id(chakra_ha_g) = g;
+              id(chakra_ha_b) = b;
+            }
+        - component.update: s3_box_lcd
+
+text:
+  - platform: template
+    name: "Notification Text"
+    id: notification_text
+    mode: text
+    optimistic: true
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(notification_text).state.empty() && 
+                (id(previous_notification_text).empty() || id(notification_text).state != id(previous_notification_text))) {
+              id(previous_notification_text) = id(notification_text).state;
+              id(show_notification).execute();
+            }
+
+# ─── HTTP Request (for AWS Bedrock relay) ─────────────────────────
+http_request:
+  useragent: "ESPHome/ESP32-S3-BOX-3"
+  timeout: 10s
+  verify_ssl: false
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO2
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    i2c_id: bus_a
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    mic_gain: 24dB
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: bus_a
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: box_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO16
+    bits_per_sample: 16bit
+    adc_type: external
+    on_data:
+      - lambda: |-
+          if (!id(chakra_mode_active)) return;
+          const int16_t* samples = reinterpret_cast<const int16_t*>(x.data());
+          size_t sample_count = x.size() / 2;
+          // Always update fill progress (runs even between FFT frames)
+          id(fft_accum_fill) = ChakraAnalyser::accum_fill;
+          if (ChakraAnalyser::push_samples(samples, sample_count,
+                                           id(chakra_detection_threshold))) {
+            // ── Hold/stability logic ─────────────────────────────────────
+            // When currently showing NO chakra (-1): accept detection after confirm_req frames.
+            // When currently showing A chakra: hold for hold_req frames before switching.
+            // This avoids delaying initial detection while still preventing rapid switching.
+            int new_chakra = ChakraAnalyser::dominant_chakra;
+            int hold_req = id(chakra_hold_frames);
+            int confirm_req = hold_req / 4;
+            if (confirm_req < 1) confirm_req = 1;
+            if (id(chakra_index) < 0) {
+                // Currently showing no chakra — accept first confirmed detection immediately
+                if (new_chakra >= 0) {
+                    if (new_chakra == id(chakra_candidate)) {
+                        id(chakra_candidate_count) += 1;
+                        if (id(chakra_candidate_count) >= 1) {  // instant: 1 frame confirms
+                            id(chakra_index) = new_chakra;
+                            id(chakra_hold_counter) = hold_req;
+                            id(chakra_candidate) = -2;
+                            id(chakra_candidate_count) = 0;
+                        }
+                    } else {
+                        id(chakra_candidate) = new_chakra;
+                        id(chakra_candidate_count) = 1;
+                    }
+                }
+                // new_chakra=-1 while already -1: nothing to do
+            } else {
+                // Currently showing a chakra — hold it unless something else confirmed
+                if (new_chakra == id(chakra_index)) {
+                    // Same chakra still detected — refresh hold timer
+                    id(chakra_hold_counter) = hold_req;
+                    id(chakra_candidate) = -2;
+                    id(chakra_candidate_count) = 0;
+                } else {
+                    // Different result — count down hold timer first
+                    if (id(chakra_hold_counter) > 0) id(chakra_hold_counter) -= 1;
+                    if (id(chakra_hold_counter) <= 0) {
+                        // Hold expired — evaluate candidate
+                        if (new_chakra == id(chakra_candidate)) {
+                            id(chakra_candidate_count) += 1;
+                            if (id(chakra_candidate_count) >= confirm_req) {
+                                id(chakra_index) = new_chakra;
+                                id(chakra_hold_counter) = (new_chakra >= 0) ? hold_req : 0;
+                                id(chakra_candidate) = -2;
+                                id(chakra_candidate_count) = 0;
+                            }
+                        } else {
+                            id(chakra_candidate) = new_chakra;
+                            id(chakra_candidate_count) = 1;
+                        }
+                    }
+                }
+            }
+            id(peak_freq_hz)    = ChakraAnalyser::peak_frequency;
+            id(signal_level_db) = ChakraAnalyser::signal_db;
+            id(fft_accum_fill)  = 1024;
+            id(fft_bar_0)  = ChakraAnalyser::bar_magnitudes[0];
+            id(fft_bar_1)  = ChakraAnalyser::bar_magnitudes[1];
+            id(fft_bar_2)  = ChakraAnalyser::bar_magnitudes[2];
+            id(fft_bar_3)  = ChakraAnalyser::bar_magnitudes[3];
+            id(fft_bar_4)  = ChakraAnalyser::bar_magnitudes[4];
+            id(fft_bar_5)  = ChakraAnalyser::bar_magnitudes[5];
+            id(fft_bar_6)  = ChakraAnalyser::bar_magnitudes[6];
+            id(fft_bar_7)  = ChakraAnalyser::bar_magnitudes[7];
+            id(fft_bar_8)  = ChakraAnalyser::bar_magnitudes[8];
+            id(fft_bar_9)  = ChakraAnalyser::bar_magnitudes[9];
+            id(fft_bar_10) = ChakraAnalyser::bar_magnitudes[10];
+            id(fft_bar_11) = ChakraAnalyser::bar_magnitudes[11];
+            id(fft_bar_12) = ChakraAnalyser::bar_magnitudes[12];
+            id(fft_bar_13) = ChakraAnalyser::bar_magnitudes[13];
+            id(fft_bar_14) = ChakraAnalyser::bar_magnitudes[14];
+            id(fft_bar_15) = ChakraAnalyser::bar_magnitudes[15];
+            id(chakra_fft_ready) = true;  // signal main loop: new data ready
+            // ── AWS: send frequency to Bedrock if enabled ──
+            if (id(aws_mode_active) && id(wifi_connection) && new_chakra >= 0) {
+              uint32_t now_ms = millis();
+              if (now_ms - id(aws_last_send_ms) > 3000) {
+                id(aws_last_send_ms) = now_ms;
+                id(send_frequency_to_aws).execute();
+              }
+            }
+          }
+
+speaker:
+  - id: i2s_audio_speaker
+    platform: i2s_audio
+    i2s_audio_id: i2s_audio_bus
+    i2s_dout_pin: GPIO15
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    audio_dac: es8311_dac
+    buffer_duration: 500ms  # Increased for stability without timeout @youkorr
+  # Virtual speakers to combine the announcement and media streams together into one output
+  - id: mixing_speaker
+    platform: mixer
+    output_speaker: i2s_audio_speaker
+    source_speakers:
+      - id: announcement_mixing_input
+      - id: media_mixing_input
+  # Vritual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000  # Added explicit sample rate
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000  # Added explicit sample rate
+
+media_player:
+  - platform: speaker
+    name: Media Player
+    id: speaker_media_player
+    disabled_by_default: true
+    volume_increment: 0.05
+    volume_min: 0.5
+    volume_max: 0.8
+    task_stack_in_psram: true
+    announcement_pipeline:
+      speaker: announcement_resampling_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1  # S3 Box only has one output channel
+    media_pipeline:
+      speaker: media_resampling_speaker
+      format: FLAC  # FLAC is the least processor intensive codec
+      num_channels: 2
+      sample_rate: 48000
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+      - id: wake_sound_file
+        file: https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/sounds/awake.flac
+    on_state:
+      then:
+        - if:
+            condition:
+              media_player.is_playing:
+            then:
+              - micro_wake_word.stop
+              - voice_assistant.stop
+        - if:
+            condition:
+              and:
+                - lambda: return id(global_is_assisting) == false;
+                - or:
+                    - media_player.is_idle
+                    - media_player.is_paused
+            then:
+              - if:
+                  condition:
+                    and:
+                      - switch.is_off: mute_switch
+                      - lambda: return id(wake_word_engine_location).state == "On device";
+                  then:
+                    - micro_wake_word.start
+                  else:
+                    - if:
+                        condition:
+                          - switch.is_off: mute_switch
+                        then:
+                          - voice_assistant.start
+        - if:
+            condition:
+              and:
+                - switch.is_off: timer_ringing
+                - not:
+                    voice_assistant.is_running:
+                - not:
+                    media_player.is_announcing:
+            then:
+              - mixer_speaker.apply_ducking:
+                  id: media_mixing_input
+                  decibel_reduction: 0
+                  duration: 1.0s
+    on_play:
+      - wait_until:
+          - lambda: return id(global_is_assisting) == false;
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+
+micro_wake_word:
+  vad:
+  models:
+    #- model: ${micro_wake_word_model_1}
+    # - model: ${micro_wake_word_model_2}
+    - model: ${micro_wake_word_model_3}
+    # - model: ${micro_wake_word_model_4}
+  on_wake_word_detected:
+    - lambda: id(global_is_assisting) = true;
+    - delay: 50ms
+    - if:
+        condition:
+          and:
+            - switch.is_off: output_audio
+            - switch.is_on: wake_sound
+        then:
+          - media_player.speaker.play_on_device_media_file:
+              media_file: wake_sound_file
+              announcement: true
+          - wait_until:
+              not:
+                - media_player.is_announcing:
+          - delay: 150ms
+        else:
+          if:
+            condition:
+              and:
+                - switch.is_on: output_audio
+                - switch.is_on: wake_sound
+            then:
+              - homeassistant.service:
+                  service: media_player.play_media
+                  data:
+                    entity_id: media_player.${external_media_player}
+                    media_content_id: '${home_assistant_host}/local/sounds/awake.mp3'
+                    media_content_type: music
+    - display.page.show: listening_page
+    - component.update: s3_box_lcd
+    - delay: 100ms
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: box_mic
+  media_player: speaker_media_player
+  use_wake_word: true
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  on_wake_word_detected:
+    - lambda: id(global_is_assisting) = true;
+    - voice_assistant.stop:
+    - lambda: id(va).set_use_wake_word(false);
+    - if:
+        condition:
+          and:
+            - switch.is_off: output_audio
+            - switch.is_on: wake_sound
+        then:
+          # - voice_assistant.stop:
+          # - delay: 150ms
+          # - if:
+              # condition:
+                # not:
+                  # microphone.is_capturing:
+              # then:
+          - media_player.speaker.play_on_device_media_file:
+              media_file: wake_sound_file
+              announcement: true
+          - wait_until:
+              not:
+                - media_player.is_announcing:
+          - delay: 150ms
+          - lambda: id(va).set_use_wake_word(false);
+          - display.page.show: listening_page
+          - component.update: s3_box_lcd
+        else:
+          if:
+            condition:
+              and:
+                - switch.is_on: wake_sound
+                - switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.play_media
+                  data:
+                    entity_id: media_player.${external_media_player}
+                    media_content_id: '${home_assistant_host}/local/sounds/awake.mp3'
+                    media_content_type: music
+    - voice_assistant.start
+  on_start:
+    if:
+      condition:
+        - display.is_displaying_page: listening_page
+        - display.is_displaying_page: thinking_page
+      then:
+        - display.page.show: idle_page
+        - component.update: s3_box_lcd
+  on_listening:
+    - text_sensor.template.publish:
+        id: text_request
+        state: "..."
+    - text_sensor.template.publish:
+        id: text_response
+        state: "..."
+    - script.execute: saver_enabled
+    - display.page.show: listening_page
+    - component.update: s3_box_lcd
+  on_stt_end:
+    - text_sensor.template.publish:
+        id: text_request
+        state: !lambda return x;
+  on_stt_vad_end:
+    - display.page.show: thinking_page
+    - component.update: s3_box_lcd
+  on_tts_start:
+    - text_sensor.template.publish:
+        id: text_response
+        state: !lambda return x;
+  on_tts_end:
+    - if:
+        condition:
+          and:
+            - switch.is_on: mute_response_switch
+            - switch.is_off: media_mute
+            - switch.is_off: ext_media_mute
+        then:
+          - switch.turn_on: media_mute
+          - switch.turn_on: ext_media_mute
+    - display.page.show: replying_page
+    - component.update: s3_box_lcd
+    - if:
+        condition:
+          - switch.is_on: output_audio
+        then:
+          - homeassistant.service:
+              service: media_player.play_media
+              data:
+                entity_id: media_player.${external_media_player}
+                media_content_id: !lambda 'return x;'
+                media_content_type: music
+                announce: "false"
+    - delay: 5s
+    - display.page.show: idle_page
+    - component.update: s3_box_lcd
+
+  on_error:
+    - if:
+        condition:
+          not:
+            - voice_assistant.is_running
+        then:
+          - display.page.show: error_page
+          - component.update: s3_box_lcd
+          - delay: 4s
+          - if:
+              condition:
+                - display.is_displaying_page: error_page
+              then:
+                - display.page.show: idle_page
+                - component.update: s3_box_lcd
+    - lambda: id(global_is_assisting) = false;
+
+  on_idle:
+    - if:
+        condition:
+          lambda: return !id(chakra_mode_active);
+        then:
+          - display.page.show: idle_page
+          - component.update: s3_box_lcd
+
+  on_end:
+    - if:
+        condition:
+          lambda: return id(chakra_mode_active);
+        then:
+          - lambda: id(global_is_assisting) = false;
+        else:
+          - wait_until:
+              not:
+                voice_assistant.is_running:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+          - lambda: id(global_is_assisting) = false;
+          - if:
+              condition:
+                and:
+                  - switch.is_off: mute_switch
+                  - lambda: return id(wake_word_engine_location).state == "On device";
+              then:
+                - voice_assistant.stop
+                - micro_wake_word.start
+              else:
+                if:
+                  condition:
+                    - switch.is_off: mute_switch
+                  then:
+                    - lambda: id(va).set_use_wake_word(false);
+                    - voice_assistant.stop:
+                    - delay: 100ms
+                    - lambda: id(va).set_use_wake_word(true);
+                    - delay: 100ms
+                    - voice_assistant.start_continuous:
+    - if:
+        condition:
+          and:
+            - switch.is_on: mute_response_switch
+            - switch.is_on: media_mute
+            - switch.is_on: ext_media_mute
+        then:
+          - switch.turn_off: media_mute
+          - switch.turn_off: ext_media_mute
+
+  on_client_connected:
+    - if:
+        condition:
+          lambda: return !id(chakra_mode_active);
+        then:
+          - script.execute: start_voice_assistant
+  on_timer_started:
+    - script.execute: timer_ending
+    - component.update: s3_box_lcd
+  on_timer_cancelled:
+    - lambda: id(time_remaining_0).publish_state ("0:00:00");
+    - component.update: s3_box_lcd
+  on_timer_updated:
+    - component.update: s3_box_lcd
+  on_timer_tick:
+    - lambda: |-
+        int seconds = timers[0].seconds_left;
+        int hours = seconds / 3600;
+        int minutes = (seconds % 3600) / 60;
+        seconds %= 60;
+        id(time_remaining_0).publish_state(str_sprintf("%d:%02d:%02d", hours, minutes, seconds));
+    - component.update: s3_box_lcd
+  on_timer_finished:
+    if:
+      condition:
+        - switch.is_on: output_audio
+      then:
+        - switch.turn_on: timer_ringing
+        - script.execute: timer_started_external
+        - display.page.show: idle_page
+        - component.update: s3_box_lcd
+      else:
+        - if:
+            condition:
+              - switch.is_off: output_audio
+            then:
+              - switch.turn_on: timer_ringing
+              # - script.execute: timer_started
+              - display.page.show: idle_page
+              - component.update: s3_box_lcd
+
+
+
+image:
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/images/logo.png"
+    id: logo_img
+    resize: 80x75
+    type: RGB
+    transparency: alpha_channel
+
+font:
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font12
+    size: 12
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font
+    size: 14
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font16
+    size: 16
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font5
+    size: 22
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font3
+    size: 28
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font4
+    size: 40
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/consola.ttf"
+    id: my_font2
+    size: 72
+    glyphs: '${font_glyphs}'
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/materialdesignicons-webfont.ttf"
+    id: icon_font_30
+    size: 30
+    glyphs: &icon_glyphs
+      - "\U000F0079"  # battery 100%
+      - "\U000F007A"  # battery 10%
+      - "\U000F007B"  # battery 20%
+      - "\U000F007C"  # battery 30%
+      - "\U000F007D"  # battery 40%
+      - "\U000F007E"  # battery 50%
+      - "\U000F007F"  # battery 60%
+      - "\U000F0080"  # battery 70%
+      - "\U000F0081"  # battery 80%
+      - "\U000F0082"  # battery 90%
+      - "\U000F009E"  # bell
+      - "\U000F0150"  # clock
+      - "\U000F0210"  # fan
+      - "\U000F0238"  # heating
+      - "\U000F024A"  # garden
+      - "\U000F09EC"  # water drop
+      - "\U000F0335"  # light bulb off
+      - "\U000F0336"  # lightbulb on
+      - "\U000F036C"  # microphone on
+      - "\U000F036D"  # microphone off
+      - "\U000F036F"  # voice settings
+      - "\U000F03E4"  # pause
+      - "\U000F040A"  # play
+      - "\U000F040E"  # play/pause
+      - "\U000F0493"  # settings cog
+      - "\U000F04AD"  # next track
+      - "\U000F04AE"  # previous track
+      - "\U000F04B9"  # living room
+      - "\U000F04DB"  # stop
+      - "\U000F0502"  # screen settings
+      - "\U000F050F"  # temp sensor
+      - "\U000F0521"  # toggle on
+      - "\U000F057E"  # speaker on
+      - "\U000F0581"  # speaker off
+      - "\U000F05CB"  # voice
+      - "\U000F06E8"  # light bulb illuminated
+      - "\U000F075A"  # music
+      - "\U000F075D"  # vol plus
+      - "\U000F075E"  # vol minus
+      - "\U000F07D0"  # api connected
+      - "\U000F087B"  # api disconnected
+      - "\U000F08D6"  # settings
+      - "\U000F094B"  # chakra grain
+      - "\U000F0A19"  # toggle off
+      - "\U000F0B26"  # down
+      - "\U000F0B28"  # left
+      - "\U000F0B2A"  # right
+      - "\U000F0B2C"  # up
+      - "\U000F0D90"  # screen off
+      - "\U000F0EBA"  # stats
+      - "\U000F0ED4"  # voice off
+      - "\U000F10CD"  # battery warning
+      - "\U000F1253"  # floor-lamp on
+      - "\U000F12CD"  # floor-lamp off
+      - "\U000F1322"  # tools
+      - "\U000F16BC"  # wifi disconnected
+      - "\U000F16BD"  # wifi connected
+      - "\U000F1C3B"  # battery charging
+      - "\U000F1C6F"  # info
+      - "\U000F0A7C"  # lightbulb-group
+      - "\U000F07E4"  # water-percent
+      - "\U000F058E"  # water drop
+      - "\U000F0617"  # sound wave (chakra)
+      - "\U000F028E"  # waveform-off
+      - "\U000F1A12"  # home button
+      - "\U000F12A8"  # touch button
+      - "\U000F0163"  # cloud (AWS)
+      - "\U000F0167"  # cloud-check (AWS on)
+      - "\U000F0590"  # cloud-off-outline (AWS off)
+
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/materialdesignicons-webfont.ttf"
+    id: icon_font_55
+    size: 45
+    glyphs: *icon_glyphs
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/materialdesignicons-webfont.ttf"
+    id: icon_font_80
+    size: 75
+    glyphs: *icon_glyphs
+
+color:
+  - id: green
+    hex: '75D15F'
+  - id: red
+    hex: 'FF3131'
+  - id: blue
+    hex: '47B7E9'
+  - id: blue_drk
+    hex: '085296'
+  - id: amber
+    hex: 'FBAB35'
+  - id: orange
+    hex: 'FF6B00'
+  - id: lime
+    hex: '20FC30'
+  - id: pink
+    hex: 'D92BBC'
+  - id: yellow
+    hex: 'FFC000'
+  - id: black
+    hex: ${display_text_hex}
+  - id: white
+    hex: 'ffffff'
+  - id: display_bg
+    hex: ${display_bg_hex}
+  - id: purple
+    hex: '73264D'
+  - id: light_blue
+    hex: '1565C0'
+  - id: bg_blue
+    hex: '032341'
+  - id: bg_grey
+    hex: '4F4F4F'
+  - id: status_bar_grey
+    hex: 'EBEBEB'
+  - id: ha_blue
+    hex: '41BDF5'
+
+spi:
+  clk_pin: 7
+  mosi_pin: 6
+
+display:
+  - platform: ili9xxx
+    id: s3_box_lcd
+    model: S3BOX
+    data_rate: 40MHz
+    cs_pin: 5
+    dc_pin: 4
+    reset_pin:
+      number: 48
+      inverted: true
+    update_interval: never
+    invert_colors: false
+    pages:
+      - id: loading_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          it.printf(160, 30, id(icon_font_80), id(lime), TextAlign::TOP_CENTER, "\U000F0617");
+          it.printf(160, 108, id(my_font3), id(white), TextAlign::TOP_CENTER, "Sound Healing");
+          it.printf(160, 140, id(my_font3), id(white), TextAlign::TOP_CENTER, "ASSISTANT");
+          it.printf(160, 180, id(my_font), id(lime), TextAlign::TOP_CENTER, "Initializing sound senses...");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: idle_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          // ── Grid dividers ──
+          it.filled_rectangle(107, 36, 1, 184, Color(200,200,200));
+          it.filled_rectangle(214, 36, 1, 184, Color(200,200,200));
+          it.filled_rectangle(0, 128, 320, 1, Color(200,200,200));
+          // ── Row 1: Temp | Lamp | Chakra ──
+          it.printf(16, 42, id(icon_font_80), id(ha_blue), "\U000F050F");
+          it.printf(53, 82, id(my_font16), Color(100,100,100), TextAlign::CENTER, "%.1f\xC2\xB0C", id(s3temp).state);
+          it.printf(53, 98, id(my_font16), Color(100,100,100), TextAlign::CENTER, "%.0f%%", id(s3humidity).state);
+          {
+            bool lamp_on = id(ha_light_entity_state).state == "on";
+            Color lc = lamp_on
+              ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b))
+                 ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime))
+              : Color(180,180,180);
+            it.printf(123, 42, id(icon_font_80), lc, lamp_on ? "\U000F1253" : "\U000F12CD");
+            it.printf(160, 90, id(my_font16), Color(100,100,100), TextAlign::CENTER, "%.0f%%", (float)id(chakra_light_bri));
+          }
+          {
+            bool cha_on = id(chakra_mode_active);
+            it.printf(230, 42, id(icon_font_80), cha_on ? id(lime) : id(ha_blue), "\U000F0617");
+            it.printf(267, 100, id(my_font16), Color(100,100,100), TextAlign::CENTER, cha_on ? "ON" : "OFF");
+          }
+          // ── Row 2: Music | Clock | Settings ──
+          it.printf(16, 134, id(icon_font_80), id(ha_blue), "\U000F075A");
+          if(id(time_display_format).state == "24 Hr") {
+            it.strftime(160, 148, id(my_font4), id(ha_blue), TextAlign::TOP_CENTER, "%H:%M", id(ha_time).now());
+          } else {
+            it.strftime(160, 148, id(my_font4), id(ha_blue), TextAlign::TOP_CENTER, "%l:%M", id(ha_time).now());
+          }
+          it.strftime(160, 193, id(my_font12), Color(150,150,150), TextAlign::TOP_CENTER, "%d.%m.%y", id(ha_time).now());
+          it.printf(230, 134, id(icon_font_80), id(ha_blue), "\U000F08D6");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: clock_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          const char *days[] {"${sunday}","${monday}","${tuesday}","${wednesday}","${thursday}","${friday}","${saturday}"};
+          it.printf(160, 8, id(my_font5), light_blue, TextAlign::TOP_CENTER, "%s", days[id(ha_time).now().day_of_week - 1]);
+          if(id(time_display_format).state == "24 Hr") {
+            it.strftime(160, 35, id(my_font2), id(white), TextAlign::TOP_CENTER, "%H:%M:%S", id(ha_time).now());
+          } else {
+            it.strftime(160, 35, id(my_font2), id(white), TextAlign::TOP_CENTER, "%l:%M:%S", id(ha_time).now());
+          }
+          it.printf(160, 130, id(my_font3), id(white), TextAlign::TOP_CENTER, "%02d.%02d.%02d",
+            id(ha_time).now().day_of_month, id(ha_time).now().month, id(ha_time).now().year % 100);
+          it.filled_rectangle(40, 168, 240, 2, light_blue);
+          it.printf(160, 175, id(my_font5), light_blue, TextAlign::TOP_CENTER, "${timezone}");
+          it.printf(80, 198, id(my_font5), id(white), TextAlign::TOP_CENTER, "%.1f\xC2\xB0C", id(s3temp).state);
+          it.printf(240, 198, id(my_font5), id(white), TextAlign::TOP_CENTER, "%.1f%%", id(s3humidity).state);
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: chakra_page
+        lambda: |-
+          int cidx = id(chakra_index);
+          bool mode_on = id(chakra_mode_active);
+          it.fill(id(white));
+          // ── Title band (y=0-30) ──
+          it.filled_rectangle(0, 0, 320, 30, id(ha_blue));
+          it.printf(275, 0, id(icon_font_30), mode_on ? id(lime) : Color(180,180,180), "\U000F0617");
+          it.printf(160, 7, id(my_font5), id(white), TextAlign::TOP_CENTER, "CHAKRA SENSE");
+          // ── Chakra info band (y=30-68) ──
+          if (cidx >= 0) {
+            const ChakraInfo& ci = ChakraAnalyser::get_info(cidx);
+            it.filled_rectangle(0, 30, 320, 38, Color(ci.r, ci.g, ci.b));
+            const int dot_xs[7] = {222, 234, 246, 258, 270, 282, 294};
+            for (int i = 0; i < 7; i++) {
+              const ChakraInfo& di = ChakraAnalyser::get_info(i);
+              if (i == cidx) {
+                it.filled_circle(dot_xs[i], 49, 7, id(white));
+                it.filled_circle(dot_xs[i], 49, 5, Color(di.r, di.g, di.b));
+              } else {
+                it.filled_circle(dot_xs[i], 49, 4, Color(di.r/3+30, di.g/3+30, di.b/3+30));
+              }
+            }
+            it.printf(108, 32, id(my_font3), id(white), TextAlign::TOP_CENTER, "%s", ci.name);
+          } else {
+            it.filled_rectangle(0, 30, 320, 38, id(ha_blue));
+            it.printf(160, 38, id(my_font5), id(white), TextAlign::TOP_CENTER, "-- No Detection --");
+          }
+          // ── Info line (y=68-84) ──
+          {
+            float thr_db = 20.0f * log10f(id(chakra_detection_threshold) + 1e-9f);
+            bool has_signal = (id(signal_level_db) > -85.0f && id(peak_freq_hz) >= 20.0f);
+            char info_txt[48];
+            if (has_signal) {
+              float midi_f = 69.0f + 12.0f * log2f(id(peak_freq_hz) / 432.0f);
+              int midi_i = (int)roundf(midi_f);
+              int semi = midi_i % 12; if (semi < 0) semi += 12;
+              int octave = (midi_i / 12) - 1;
+              static const char* NOTE_NAMES[12] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+              snprintf(info_txt, sizeof(info_txt), "%s%d  %.0fHz  %.0fdB", NOTE_NAMES[semi], octave, id(peak_freq_hz), id(signal_level_db));
+            } else {
+              snprintf(info_txt, sizeof(info_txt), "- Listening -");
+            }
+            it.printf(160, 70, id(my_font16), Color(100,100,100), TextAlign::TOP_CENTER, "%s", info_txt);
+          }
+          // ── Progress strips (y=86-94) ──
+          {
+            int fill = id(fft_accum_fill); if (fill > 1024) fill = 1024;
+            int w = fill * 158 / 1024;
+            it.filled_rectangle(1, 86, 158, 8, id(bg_grey));
+            if (w > 0) it.filled_rectangle(1, 86, w, 8, id(lime));
+          }
+          {
+            float pct = (id(signal_level_db) + 60.0f) / 60.0f;
+            if (pct < 0.0f) pct = 0.0f; if (pct > 1.0f) pct = 1.0f;
+            int w = (int)(pct * 158.0f);
+            it.filled_rectangle(161, 86, 158, 8, id(bg_grey));
+            if (w > 0) {
+              Color mc = (pct > 0.8f) ? id(red) : (pct > 0.5f) ? amber : id(lime);
+              it.filled_rectangle(161, 86, w, 8, mc);
+            }
+          }
+          // ── 16 FFT bars (y=94-170) ──
+          const int bar_area_y = 94;
+          const int bar_area_h = 76;
+          it.filled_rectangle(0, bar_area_y, 320, bar_area_h + 4, id(white));
+          it.rectangle(0, bar_area_y, 320, bar_area_h + 4, (cidx >= 0) ? id(blue) : id(ha_blue));
+          float bars[16] = {
+            id(fft_bar_0), id(fft_bar_1), id(fft_bar_2), id(fft_bar_3),
+            id(fft_bar_4), id(fft_bar_5), id(fft_bar_6), id(fft_bar_7),
+            id(fft_bar_8), id(fft_bar_9), id(fft_bar_10), id(fft_bar_11),
+            id(fft_bar_12), id(fft_bar_13), id(fft_bar_14), id(fft_bar_15)
+          };
+          const int bar_w = 18; const int gap = 2;
+          static const uint8_t BAR_CHAKRA[16] = {0,0, 1,1, 2,2, 3,3, 4,4, 5,5,5, 6,6,6};
+          static float peak_pos[16] = {};
+          static float peak_vel[16] = {};
+          for (int b = 0; b < 16; b++) {
+            if (bars[b] >= peak_pos[b]) {
+              peak_pos[b] = bars[b]; peak_vel[b] = 0.0f;
+            } else {
+              peak_vel[b] += 0.012f; peak_pos[b] -= peak_vel[b];
+              if (peak_pos[b] < 0.0f) { peak_pos[b] = 0.0f; peak_vel[b] = 0.0f; }
+            }
+            const ChakraInfo& bi = ChakraAnalyser::get_info(BAR_CHAKRA[b]);
+            Color bar_col(bi.r, bi.g, bi.b);
+            int h = (int)(bars[b] * bar_area_h); if (h < 2) h = 2;
+            int x = 4 + b * (bar_w + gap);
+            it.filled_rectangle(x, bar_area_y + bar_area_h - h, bar_w, h, bar_col);
+            int ph = (int)(peak_pos[b] * bar_area_h);
+            if (ph > 4) it.filled_rectangle(x, bar_area_y + bar_area_h - ph, bar_w, 2, id(white));
+          }
+          // ── Controls (y=172-218) ──
+          const int r1y = 172;
+          const int r1h = 46;
+          const int btn_w = 30;
+          // Col1: Sensitivity
+          it.filled_rectangle(0, r1y, 107, r1h, id(display_bg));
+          it.rectangle(0, r1y, 107, r1h, Color(120,120,120));
+          it.filled_rectangle(0, r1y, btn_w, r1h, id(ha_blue));
+          it.printf(15, r1y + 23, id(my_font3), id(white), TextAlign::CENTER, "-");
+          {
+            float thr = id(chakra_detection_threshold);
+            int lvl = (thr < 0.001f) ? 5 : (thr < 0.003f) ? 4 : (thr < 0.01f) ? 3 : (thr < 0.05f) ? 2 : 1;
+            it.printf(53, r1y + 2, id(my_font), Color(160,160,160), TextAlign::TOP_CENTER, "SENS");
+            for (int d = 0; d < 5; d++) {
+              Color dc = (d < lvl) ? Color(100,160,220) : Color(200,200,200);
+              it.filled_circle(41 + d*8, r1y + 34, 4, dc);
+            }
+          }
+          it.filled_rectangle(77, r1y, btn_w, r1h, id(ha_blue));
+          it.printf(92, r1y + 23, id(my_font3), id(white), TextAlign::CENTER, "+");
+          // Col2: Hold
+          it.filled_rectangle(109, r1y, 105, r1h, id(display_bg));
+          it.rectangle(109, r1y, 105, r1h, Color(120,120,120));
+          it.filled_rectangle(109, r1y, btn_w, r1h, id(ha_blue));
+          it.printf(124, r1y + 23, id(my_font3), id(white), TextAlign::CENTER, "-");
+          it.printf(159, r1y + 2, id(my_font), Color(160,160,160), TextAlign::TOP_CENTER, "HOLD");
+          float hold_s = id(chakra_hold_frames) * 0.064f;
+          char hold_txt[10]; snprintf(hold_txt, sizeof(hold_txt), "%.1fs", hold_s);
+          it.printf(159, r1y + 26, id(my_font5), Color(160,160,160), TextAlign::TOP_CENTER, "%s", hold_txt);
+          it.filled_rectangle(184, r1y, btn_w, r1h, id(ha_blue));
+          it.printf(199, r1y + 23, id(my_font3), id(white), TextAlign::CENTER, "+");
+          // Col3: Light brightness
+          it.filled_rectangle(215, r1y, 105, r1h, id(display_bg));
+          it.rectangle(215, r1y, 105, r1h, Color(120,120,120));
+          it.filled_rectangle(215, r1y, btn_w, r1h, id(ha_blue));
+          it.printf(230, r1y + 23, id(my_font3), id(white), TextAlign::CENTER, "-");
+          it.printf(267, r1y + 2, id(my_font), Color(160,160,160), TextAlign::TOP_CENTER, "LIGHT");
+          char bri_txt[8]; snprintf(bri_txt, sizeof(bri_txt), "%d%%", id(chakra_light_bri));
+          it.printf(267, r1y + 26, id(my_font5), Color(160,160,160), TextAlign::TOP_CENTER, "%s", bri_txt);
+          it.filled_rectangle(289, r1y, btn_w, r1h, id(ha_blue));
+          it.printf(304, r1y + 23, id(my_font3), id(white), TextAlign::CENTER, "+");
+          // ── Toggle icon ──
+          if (mode_on) {
+            it.printf(0, -7, id(icon_font_55), id(lime), "\U000F0521");
+          } else {
+            it.printf(0, -7, id(icon_font_55), Color(150,150,150), "\U000F0A19");
+          }
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: lights_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          // ── Lamp icon + state (y=36-118) ──
+          {
+            bool on = id(ha_light_entity_state).state == "on";
+            Color bulb_col = on
+              ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b))
+                 ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime))
+              : Color(180,180,180);
+            it.printf(35, 38, id(icon_font_55), bulb_col, TextAlign::TOP_CENTER, on ? "\U000F1253" : "\U000F12CD");
+            it.printf(160, 60, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "${chakra_light_entity}");
+            it.printf(250, 60, id(my_font5), on ? id(lime) : Color(180,180,180), TextAlign::TOP_CENTER, on ? "ON" : "OFF");
+          }
+          // ── Brightness bar (y=95-120) ──
+          it.filled_rectangle(0, 95, 36, 25, id(ha_blue));
+          it.printf(18, 99, id(my_font5), id(white), TextAlign::TOP_CENTER, "-");
+          it.filled_rectangle(38, 97, 244, 20, Color(210,210,210));
+          {
+            int bri = id(chakra_light_bri);
+            if(bri > 0) it.filled_rectangle(38, 97, (int)(244.0f * bri / 100.0f), 20, id(ha_blue));
+          }
+          it.printf(160, 99, id(my_font16), id(black), TextAlign::TOP_CENTER, "%.0f%%", (float)id(chakra_light_bri));
+          it.filled_rectangle(284, 95, 36, 25, id(ha_blue));
+          it.printf(302, 99, id(my_font5), id(white), TextAlign::TOP_CENTER, "+");
+          // ── 7 Chakra color swatches (y=125-150) ──
+          {
+            static const int sw_x[7] = {0, 46, 91, 137, 183, 228, 274};
+            static const int sw_w[7] = {46, 45, 46, 46, 45, 46, 46};
+            int cidx_l = id(chakra_index);
+            bool mode_l = id(chakra_mode_active);
+            for (int i = 0; i < 7; i++) {
+              const ChakraInfo& ci = ChakraAnalyser::get_info(i);
+              Color cc(ci.r, ci.g, ci.b);
+              it.filled_rectangle(sw_x[i], 125, sw_w[i], 25, cc);
+              bool dark_bg = ((int)ci.r + (int)ci.g + (int)ci.b) < 400;
+              Color txt_col = dark_bg ? id(white) : id(black);
+              it.printf(sw_x[i] + sw_w[i]/2, 127, id(my_font), txt_col, TextAlign::TOP_CENTER, "%d", i+1);
+              if (i == cidx_l && mode_l) {
+                it.rectangle(sw_x[i], 125, sw_w[i], 25, id(white));
+                it.rectangle(sw_x[i]+1, 126, sw_w[i]-2, 23, id(white));
+              }
+            }
+          }
+          // ── Color temperature row (y=155-185) ──
+          it.filled_rectangle(0,   155, 106, 30, Color(255, 180, 80));
+          it.filled_rectangle(107, 155, 107, 30, Color(220, 220, 200));
+          it.filled_rectangle(215, 155, 105, 30, Color(180, 220, 255));
+          it.printf(53,  170, id(my_font5), id(black), TextAlign::CENTER, "WARM");
+          it.printf(160, 170, id(my_font5), id(black), TextAlign::CENTER, "NEUTRAL");
+          it.printf(267, 170, id(my_font5), id(black), TextAlign::CENTER, "COOL");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: media_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          // ── Mode band: EXT/INT + status (y=36-65) ──
+          if(id(output_audio).state) {
+            it.filled_rectangle(0, 36, 320, 30, id(ha_blue));
+            it.printf(8, 41, id(my_font5), lime, "EXT");
+            it.printf(279, 38, id(icon_font_30), lime, "\U000F0521");
+            it.printf(46, 41, id(my_font5), id(white), TextAlign::LEFT, "%s", id(ha_media_status).state.c_str());
+          } else {
+            it.filled_rectangle(0, 36, 320, 30, id(ha_blue));
+            it.printf(8, 41, id(my_font5), id(white), "INT");
+            it.printf(279, 38, id(icon_font_30), light_blue, "\U000F057E");
+            if(id(media_state) == true) {
+              it.printf(46, 41, id(my_font5), lime, TextAlign::LEFT, "Playing");
+            } else {
+              it.printf(46, 41, id(my_font5), light_blue, TextAlign::LEFT, "Stopped");
+            }
+          }
+          // ── 6-grid layout ──
+          it.filled_rectangle(107, 66, 1, 154, Color(200,200,200));
+          it.filled_rectangle(214, 66, 1, 154, Color(200,200,200));
+          it.filled_rectangle(0, 143, 320, 1, Color(200,200,200));
+          // Row 1: Prev | Play/Pause | Next
+          it.printf(53,  80, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F04AE");
+          it.printf(160, 80, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F040E");
+          it.printf(267, 80, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F04AD");
+          // Row 2: Vol- | Mute | Vol+
+          it.printf(53,  157, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F075E");
+          {
+            bool muted = id(output_audio).state ? id(ext_media_mute).state : id(media_mute).state;
+            it.printf(160, 157, id(icon_font_55), muted ? red : lime, TextAlign::TOP_CENTER,
+              muted ? "\U000F0581" : "\U000F057E");
+          }
+          it.printf(267, 157, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F075D");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: settings_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "SETTINGS");
+          // ── 3x2 grid ──
+          it.filled_rectangle(107, 56, 1, 162, Color(200,200,200));
+          it.filled_rectangle(214, 56, 1, 162, Color(200,200,200));
+          it.filled_rectangle(0, 138, 320, 1, Color(200,200,200));
+          // Row 1: Voice | Screen | Info
+          it.printf(53,  62, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F036F");
+          it.printf(160, 62, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F0502");
+          it.printf(267, 62, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F1C6F");
+          it.printf(53,  112, id(my_font16), id(ha_blue), TextAlign::TOP_CENTER, "Voice");
+          it.printf(160, 112, id(my_font16), id(ha_blue), TextAlign::TOP_CENTER, "Screen");
+          it.printf(267, 112, id(my_font16), id(ha_blue), TextAlign::TOP_CENTER, "Info");
+          // Row 2: Device | WiFi | Chakra
+          it.printf(53,  144, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F08D6");
+          it.printf(160, 144, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F16BD");
+          it.printf(267, 144, id(icon_font_55), id(ha_blue), TextAlign::TOP_CENTER, "\U000F0617");
+          it.printf(53,  194, id(my_font16), id(ha_blue), TextAlign::TOP_CENTER, "Device");
+          it.printf(160, 194, id(my_font16), id(ha_blue), TextAlign::TOP_CENTER, "WiFi");
+          it.printf(267, 194, id(my_font16), id(ha_blue), TextAlign::TOP_CENTER, "Chakra");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: ww_set_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "VOICE SETTINGS");
+          it.printf(245, 60, id(my_font16), light_blue, TextAlign::RIGHT, "WakeWord:");
+          it.printf(310, 56, id(my_font16), lime, TextAlign::RIGHT, "%s", id(wakeword_location).state.c_str());
+          it.printf(245, 90, id(my_font16), light_blue, TextAlign::RIGHT, "Mute responses:");
+          if(id(mute_response_switch).state) {
+            it.printf(255, 80, id(icon_font_55), lime, "\U000F0521");
+          } else {
+            it.printf(255, 80, id(icon_font_55), blue_drk, "\U000F0A19");
+          }
+          it.printf(245, 125, id(my_font16), light_blue, TextAlign::RIGHT, "Wake up sound:");
+          if(id(wake_sound).state) {
+            it.printf(255, 115, id(icon_font_55), lime, "\U000F0521");
+          } else {
+            it.printf(255, 115, id(icon_font_55), blue_drk, "\U000F0A19");
+          }
+          it.printf(245, 160, id(my_font16), light_blue, TextAlign::RIGHT, "Show Conversation:");
+          if(id(display_conversation).state) {
+            it.printf(255, 150, id(icon_font_55), lime, "\U000F0521");
+          } else {
+            it.printf(255, 150, id(icon_font_55), blue_drk, "\U000F0A19");
+          }
+          it.printf(245, 195, id(my_font), light_blue, TextAlign::RIGHT, "tap row to change");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: ss_set_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "SCREEN SAVER");
+          it.printf(245, 64, id(my_font16), light_blue, TextAlign::RIGHT, "Enable screensaver:");
+          if(id(s_saver).state) {
+            it.printf(255, 54, id(icon_font_55), lime, "\U000F0521");
+          } else {
+            it.printf(255, 54, id(icon_font_55), blue_drk, "\U000F0A19");
+          }
+          it.printf(245, 110, id(my_font16), light_blue, TextAlign::RIGHT, "Wake on presence:");
+          if(id(s_saver_presc).state) {
+            it.printf(255, 100, id(icon_font_55), lime, "\U000F0521");
+          } else {
+            it.printf(255, 100, id(icon_font_55), blue_drk, "\U000F0A19");
+          }
+          it.printf(245, 156, id(my_font16), light_blue, TextAlign::RIGHT, "Timeout to blank:");
+          if(id(s_saver_mode).state) {
+            it.printf(255, 146, id(icon_font_55), lime, "\U000F0521");
+          } else {
+            it.printf(255, 146, id(icon_font_55), blue_drk, "\U000F0A19");
+          }
+          it.printf(245, 195, id(my_font), light_blue, TextAlign::RIGHT, "tap row to change");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: device_set_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), light_blue, TextAlign::TOP_CENTER, "DEVICE SETTINGS");
+          // ── Row 1: Brightness (y=60-100) ──
+          it.printf(10, 68, id(my_font5), light_blue, "Brightness");
+          it.filled_rectangle(170, 62, 36, 32, id(ha_blue));
+          it.printf(188, 78, id(my_font3), id(white), TextAlign::CENTER, "-");
+          it.rectangle(210, 62, 56, 32, id(blue));
+          it.printf(238, 78, id(my_font5), id(lime), TextAlign::CENTER, "%.f", id(s_default_brightness).state);
+          it.filled_rectangle(270, 62, 36, 32, id(ha_blue));
+          it.printf(288, 78, id(my_font3), id(white), TextAlign::CENTER, "+");
+          // ── Row 2: Time Format (y=106-136) ──
+          it.filled_rectangle(0, 102, 320, 1, Color(220,220,220));
+          it.printf(10, 112, id(my_font5), light_blue, "Time Format:");
+          it.printf(230, 112, id(my_font5), id(lime), "%s", id(time_display_format).state.c_str());
+          // ── Row 3: Temp Offset (y=142-172) ──
+          it.filled_rectangle(0, 140, 320, 1, Color(220,220,220));
+          it.printf(10, 150, id(my_font5), light_blue, "Temp Offset:");
+          it.printf(185, 150, id(my_font5), id(lime), "%.1f\xC2\xB0C", id(temp_offset).state);
+          it.filled_rectangle(232, 144, 36, 28, id(ha_blue));
+          it.printf(250, 158, id(my_font5), id(white), TextAlign::CENTER, "-");
+          it.filled_rectangle(274, 144, 36, 28, id(ha_blue));
+          it.printf(292, 158, id(my_font5), id(white), TextAlign::CENTER, "+");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: wifi_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "WiFi INFO");
+          it.printf(10, 56, id(my_font), light_blue, "IP Address");
+          it.printf(10, 72, id(my_font5), id(lime), "%s", id(ip_addr).state.c_str());
+          it.printf(10, 100, id(my_font), light_blue, "SSID");
+          it.printf(200, 100, id(my_font), light_blue, "Signal");
+          it.printf(10, 116, id(my_font5), yellow, "%s", id(connected_ssid).state.c_str());
+          it.printf(200, 116, id(my_font5), yellow, "%.0f%%", id(wifi_percent).state);
+          it.printf(10, 144, id(my_font), light_blue, "BSSID");
+          it.printf(10, 158, id(my_font), yellow, "%s", id(connected_bssid).state.c_str());
+          it.printf(10, 178, id(my_font), light_blue, "MAC");
+          it.printf(10, 192, id(my_font), yellow, "%s", id(device_mac).state.c_str());
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: info_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "DEVICE INFO");
+          it.printf(155, 62, id(my_font5), light_blue, TextAlign::RIGHT, "IP Address:");
+          it.printf(165, 62, id(my_font5), yellow, TextAlign::LEFT, "%s", id(ip_addr).state.c_str());
+          it.printf(155, 87, id(my_font5), light_blue, TextAlign::RIGHT, "Host Name:");
+          it.printf(165, 87, id(my_font5), yellow, TextAlign::LEFT, "${name}.local");
+          it.printf(155, 112, id(my_font5), light_blue, TextAlign::RIGHT, "Uptime:");
+          it.printf(165, 112, id(my_font5), yellow, TextAlign::LEFT, "%s", id(up_sens_text).state.c_str());
+          it.printf(155, 137, id(my_font5), light_blue, TextAlign::RIGHT, "Battery:");
+          it.printf(165, 137, id(my_font5), yellow, TextAlign::LEFT, "%.0f%%", id(battery_percent).state);
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: chakra_set_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          it.printf(160, 38, id(my_font5), id(ha_blue), TextAlign::TOP_CENTER, "CHAKRA DEFAULTS");
+          it.filled_rectangle(107, 54, 1, 166, Color(200,200,200));
+          it.filled_rectangle(214, 54, 1, 166, Color(200,200,200));
+          it.printf(53,  58, id(my_font), Color(160,160,160), TextAlign::TOP_CENTER, "SENSITIVITY");
+          it.printf(160, 58, id(my_font), Color(160,160,160), TextAlign::TOP_CENTER, "HOLD TIME");
+          it.printf(267, 58, id(my_font), Color(160,160,160), TextAlign::TOP_CENTER, "LIGHT BRI");
+          {
+            float thr = id(chakra_detection_threshold);
+            int lvl = (thr < 0.001f) ? 5 : (thr < 0.003f) ? 4 : (thr < 0.01f) ? 3 : (thr < 0.05f) ? 2 : 1;
+            it.printf(53, 76, id(my_font5), id(lime), TextAlign::TOP_CENTER, "Lv %d", lvl);
+            for (int d = 0; d < 5; d++) {
+              Color dc = (d < lvl) ? Color(100,160,220) : Color(200,200,200);
+              it.filled_circle(29 + d*10, 101, 5, dc);
+            }
+          }
+          {
+            float hold_s = id(chakra_hold_frames) * 0.064f;
+            it.printf(160, 76, id(my_font5), id(lime), TextAlign::TOP_CENTER, "%.1fs", hold_s);
+          }
+          it.printf(267, 76, id(my_font5), id(lime), TextAlign::TOP_CENTER, "%d%%", id(chakra_light_bri));
+          // Buttons [-] [+] per column
+          it.filled_rectangle(5,  120, 42, 45, id(ha_blue));
+          it.printf(26, 142, id(my_font3), id(white), TextAlign::CENTER, "-");
+          it.filled_rectangle(60, 120, 42, 45, id(ha_blue));
+          it.printf(81, 142, id(my_font3), id(white), TextAlign::CENTER, "+");
+          it.filled_rectangle(112, 120, 42, 45, id(ha_blue));
+          it.printf(133, 142, id(my_font3), id(white), TextAlign::CENTER, "-");
+          it.filled_rectangle(167, 120, 42, 45, id(ha_blue));
+          it.printf(188, 142, id(my_font3), id(white), TextAlign::CENTER, "+");
+          it.filled_rectangle(219, 120, 42, 45, id(ha_blue));
+          it.printf(240, 142, id(my_font3), id(white), TextAlign::CENTER, "-");
+          it.filled_rectangle(274, 120, 42, 45, id(ha_blue));
+          it.printf(295, 142, id(my_font3), id(white), TextAlign::CENTER, "+");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: listening_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          it.printf(160, 50, id(icon_font_80), id(lime), TextAlign::TOP_CENTER, "\U000F036C");
+          it.printf(160, 140, id(my_font3), id(white), TextAlign::TOP_CENTER, "Listening...");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: thinking_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          it.printf(160, 40, id(icon_font_80), id(lime), TextAlign::TOP_CENTER, "\U000F0493");
+          it.printf(160, 130, id(my_font3), id(white), TextAlign::TOP_CENTER, "Thinking...");
+          if (id(display_conversation).state) {
+            it.filled_rectangle(0, 0, 320, 30, Color::WHITE);
+            it.printf(10, 10, id(my_font16), Color::BLACK, "%s", id(text_request).state.c_str());
+          }
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: replying_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          it.printf(160, 60, id(icon_font_80), id(lime), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(160, 145, id(my_font5), id(white), TextAlign::TOP_CENTER, "Replying...");
+          if (id(display_conversation).state) {
+            it.filled_rectangle(0, 0, 320, 30, Color::WHITE);
+            it.filled_rectangle(0, 190, 320, 30, Color::WHITE);
+            it.printf(10, 10, id(my_font16), Color::BLACK, "%s", id(text_request).state.c_str());
+            it.printf(10, 195, id(my_font16), Color::BLACK, "%s", id(text_response).state.c_str());
+          }
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: error_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          it.printf(160, 50, id(icon_font_80), id(red), TextAlign::TOP_CENTER, "\U000F009E");
+          it.printf(160, 140, id(my_font3), id(white), TextAlign::TOP_CENTER, "Voice Error");
+          it.printf(160, 180, id(my_font), Color(180,200,255), TextAlign::TOP_CENTER, "Please try again");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: saver_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          const char *days[] {"${sunday}","${monday}","${tuesday}","${wednesday}","${thursday}","${friday}","${saturday}"};
+          it.printf(160, 8, id(my_font5), light_blue, TextAlign::TOP_CENTER, "%s", days[id(ha_time).now().day_of_week - 1]);
+          if(id(time_display_format).state == "24 Hr") {
+            it.strftime(160, 35, id(my_font2), id(white), TextAlign::TOP_CENTER, "%H:%M:%S", id(ha_time).now());
+          } else {
+            it.strftime(160, 35, id(my_font2), id(white), TextAlign::TOP_CENTER, "%l:%M:%S", id(ha_time).now());
+          }
+          it.printf(160, 130, id(my_font3), id(white), TextAlign::TOP_CENTER, "%02d.%02d.%02d",
+            id(ha_time).now().day_of_month, id(ha_time).now().month, id(ha_time).now().year % 100);
+          it.filled_rectangle(40, 168, 240, 2, light_blue);
+          it.printf(160, 175, id(my_font5), light_blue, TextAlign::TOP_CENTER, "${timezone}");
+          it.printf(80, 198, id(my_font5), id(white), TextAlign::TOP_CENTER, "%.1f\xC2\xB0C", id(s3temp).state);
+          it.printf(240, 198, id(my_font5), id(white), TextAlign::TOP_CENTER, "%.1f%%", id(s3humidity).state);
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: ota_page
+        lambda: |-
+          it.filled_rectangle(0, 0, 320, 240, id(ha_blue));
+          it.printf(160, 30, id(icon_font_80), id(lime), TextAlign::TOP_CENTER, "\U000F08D6");
+          it.printf(160, 108, id(my_font3), id(white), TextAlign::TOP_CENTER, "Captain Leopard is");
+          it.printf(160, 140, id(my_font3), id(white), TextAlign::TOP_CENTER, "cooking firmware");
+          it.printf(160, 180, id(my_font), id(red), TextAlign::TOP_CENTER, "Over-The-Air Update");
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+      - id: notification_page
+        lambda: |-
+          it.fill(id(display_bg));
+          it.filled_rectangle(0, 0, 320, 36, id(ha_blue));
+          it.printf(20, 3, id(icon_font_30), id(api_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(api_connection) ? "\U000F07D0" : "\U000F087B");
+          it.printf(60, 3, id(icon_font_30), id(wifi_connection) ? id(lime) : id(red), TextAlign::TOP_CENTER, id(wifi_connection) ? "\U000F16BD" : "\U000F16BC");
+          it.printf(100, 3, id(icon_font_30), id(aws_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, id(aws_mode_active) ? "\U000F0167" : "\U000F0590");
+          it.printf(140, 3, id(icon_font_30), id(mute_switch).state ? id(red) : id(lime), TextAlign::TOP_CENTER, id(mute_switch).state ? "\U000F036D" : "\U000F036C");
+          it.printf(180, 3, id(icon_font_30), (!id(chakra_mode_active) && !id(mute_switch).state) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F05CB");
+          it.printf(220, 3, id(icon_font_30), id(chakra_mode_active) ? id(lime) : id(white), TextAlign::TOP_CENTER, "\U000F0617");
+          {
+            bool _on = id(ha_light_entity_state).state == "on";
+            Color _lc = _on ? ((id(chakra_ha_r)||id(chakra_ha_g)||id(chakra_ha_b)) ? Color(id(chakra_ha_r),id(chakra_ha_g),id(chakra_ha_b)) : id(lime)) : id(white);
+            it.printf(260, 3, id(icon_font_30), _lc, TextAlign::TOP_CENTER, "\U000F0335");
+          }
+          {
+            float _b = id(battery_percent).state;
+            const char* _bi = _b>=95?"\U000F0079":_b>=85?"\U000F0082":_b>=75?"\U000F0081":_b>=65?"\U000F0080":_b>=55?"\U000F007F":_b>=45?"\U000F007E":_b>=35?"\U000F007D":_b>=25?"\U000F007C":_b>=15?"\U000F007B":_b>=5?"\U000F007A":"\U000F10CD";
+            it.printf(300, 3, id(icon_font_30), id(lime), TextAlign::TOP_CENTER, _bi);
+          }
+          const char* text = id(notification_text).state.c_str();
+          int max_chars_per_line = 14;
+          int line_height = 40;
+          int display_width = 320;
+          int display_height = 240;
+          int y = 60;
+          std::vector<std::string> lines;
+          std::string current_line;
+          for (const char* p = text; *p != '\0'; ++p) {
+            if (current_line.length() >= max_chars_per_line || *p == '\n') {
+              lines.push_back(current_line);
+              current_line.clear();
+              if (*p != '\n') current_line += *p;
+            } else {
+              current_line += *p;
+            }
+          }
+          if (!current_line.empty()) lines.push_back(current_line);
+          int total_height = lines.size() * line_height;
+          y = (display_height - total_height) / 2;
+          for (const auto& line : lines) {
+            int line_width = line.length() * 21;
+            int x = (display_width - line_width) / 2;
+            it.printf(x, y, id(my_font4), id(ha_blue), TextAlign::BASELINE_LEFT, "%s", line.c_str());
+            y += line_height;
+          }
+          it.filled_rectangle(0, 220, 320, 20, id(ha_blue));
+          it.printf(160, 223, id(my_font12), id(white), TextAlign::TOP_CENTER, "Sound Healing Assistant by Captain Leopard");
+i2c:
+  - id: bus_a
+    sda: GPIO08
+    scl: GPIO18
+    scan: true
+    sda_pullup_enabled: true
+    scl_pullup_enabled: true
+    frequency: 100kHz
+  - sda: GPIO41
+    scl: GPIO40
+    scan: true
+    sda_pullup_enabled: true
+    scl_pullup_enabled: true
+    frequency: 50kHz
+    id: bus_b
+
+touchscreen:
+  - platform: gt911
+    i2c_id: bus_a
+    address: 0x5D
+    id: gt911_touchscreen
+    interrupt_pin:
+      number: GPIO3
+      ignore_strapping_warning: true
+    on_touch:
+      - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+    on_release:
+      - script.execute: saver_enabled
+
+binary_sensor:
+  # ── Boot button (GPIO0): toggle chakra mode ──
+  - platform: gpio
+    id: top_left_button
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true
+      ignore_strapping_warning: true
+    on_press:
+      - if:
+          condition:
+            - display.is_displaying_page: saver_page
+          then:
+            - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+            - display.page.show: idle_page
+            - script.execute: saver_enabled
+            - component.update: s3_box_lcd
+          else:
+            - if:
+                condition:
+                  lambda: return !id(chakra_transitioning);
+                then:
+                  - switch.toggle: chakra_mode_switch
+                  - component.update: s3_box_lcd
+
+  # ── Red circle home button ──
+  - platform: gt911
+    id: home_button
+    index: 0
+    on_press:
+      if:
+        condition:
+          - display.is_displaying_page: idle_page
+        then:
+          - script.execute: saver_enabled
+        else:
+          - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state /100).perform();
+          - display.page.show: idle_page
+          - component.update: s3_box_lcd
+
+  # ── Radar presence sensor ──
+  - platform: gpio
+    pin:
+      number: GPIO21
+    name: "Presence detect"
+    disabled_by_default: false
+    device_class: "occupancy"
+    on_state:
+      if:
+        condition:
+          and:
+            - switch.is_on: s_saver
+            - switch.is_on: s_saver_presc
+            - display.is_displaying_page: saver_page
+        then:
+          - display.page.show: idle_page
+          - component.update: s3_box_lcd
+          - script.execute: saver_enabled
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_1
+    internal: true
+    x_min: 0
+    x_max: 40
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: info_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_2
+    internal: true
+    x_min: 41
+    x_max: 80
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: wifi_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_aws
+    internal: true
+    x_min: 81
+    x_max: 120
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: aws_mode_switch
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_3
+    internal: true
+    x_min: 121
+    x_max: 160
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: mute_switch
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_4
+    internal: true
+    x_min: 161
+    x_max: 240
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              lambda: return !id(chakra_transitioning);
+            then:
+              - switch.toggle: chakra_mode_switch
+              - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_5
+    internal: true
+    x_min: 241
+    x_max: 280
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: lights_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    pages:
+      - idle_page
+      - info_page
+      - lights_page
+      - media_page
+      - device_set_page
+      - settings_page
+      - chakra_set_page
+      - ss_set_page
+      - ww_set_page
+      - wifi_page
+    id: status_bar_6
+    internal: true
+    x_min: 281
+    x_max: 319
+    y_min: 0
+    y_max: 36
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: settings_page
+        - component.update: s3_box_lcd
+
+  # Settings page: Voice
+  - platform: touchscreen
+    page_id: settings_page
+    id: voice_set
+    internal: true
+    x_min: 5
+    x_max: 105
+    y_min: 54
+    y_max: 136
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: ww_set_page
+        - component.update: s3_box_lcd
+
+  # Settings page: Screen
+  - platform: touchscreen
+    page_id: settings_page
+    id: ss_set
+    internal: true
+    x_min: 110
+    x_max: 210
+    y_min: 54
+    y_max: 136
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: ss_set_page
+        - component.update: s3_box_lcd
+
+  # Settings page: Info
+  - platform: touchscreen
+    page_id: settings_page
+    id: info_set
+    internal: true
+    x_min: 215
+    x_max: 315
+    y_min: 54
+    y_max: 136
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: info_page
+        - component.update: s3_box_lcd
+
+  # Settings page: Device
+  - platform: touchscreen
+    page_id: settings_page
+    id: device_set
+    internal: true
+    x_min: 5
+    x_max: 106
+    y_min: 138
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: device_set_page
+        - component.update: s3_box_lcd
+
+  # Settings page: WiFi
+  - platform: touchscreen
+    page_id: settings_page
+    id: wifi_set
+    internal: true
+    x_min: 108
+    x_max: 213
+    y_min: 138
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: wifi_page
+        - component.update: s3_box_lcd
+
+  # Settings page: Chakra
+  - platform: touchscreen
+    page_id: settings_page
+    id: chakra_nav_set
+    internal: true
+    x_min: 215
+    x_max: 315
+    y_min: 138
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: chakra_set_page
+        - component.update: s3_box_lcd
+
+  # Clock page — tap to return
+  - platform: touchscreen
+    page_id: clock_page
+    id: clock_back_btn
+    internal: true
+    x_min: 0
+    x_max: 319
+    y_min: 0
+    y_max: 239
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: idle_page
+        - component.update: s3_box_lcd
+
+  # ── Idle page grid (2x3) ──
+  # Temp cell → info_page
+  - platform: touchscreen
+    page_id: idle_page
+    id: control_1
+    internal: true
+    x_min: 0
+    x_max: 106
+    y_min: 36
+    y_max: 127
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: info_page
+        - component.update: s3_box_lcd
+
+  # Lamp cell → lights_page
+  - platform: touchscreen
+    page_id: idle_page
+    id: control_2
+    internal: true
+    x_min: 107
+    x_max: 213
+    y_min: 36
+    y_max: 127
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: lights_page
+        - component.update: s3_box_lcd
+
+  # Chakra cell → chakra_page
+  - platform: touchscreen
+    page_id: idle_page
+    id: control_3
+    internal: true
+    x_min: 214
+    x_max: 319
+    y_min: 36
+    y_max: 127
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: chakra_page
+        - component.update: s3_box_lcd
+
+  # Music cell → media_page
+  - platform: touchscreen
+    page_id: idle_page
+    id: control_4
+    internal: true
+    x_min: 0
+    x_max: 106
+    y_min: 128
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: media_page
+        - component.update: s3_box_lcd
+
+  # Clock cell → clock_page
+  - platform: touchscreen
+    page_id: idle_page
+    id: control_5
+    internal: true
+    x_min: 107
+    x_max: 213
+    y_min: 128
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: clock_page
+        - component.update: s3_box_lcd
+
+  # Settings cell → settings_page
+  - platform: touchscreen
+    page_id: idle_page
+    id: control_6
+    internal: true
+    x_min: 214
+    x_max: 319
+    y_min: 128
+    y_max: 219
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: settings_page
+        - component.update: s3_box_lcd
+
+  # ── Lights page handlers ──
+  # Lamp icon toggle
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights1
+    internal: true
+    x_min: 5
+    x_max: 155
+    y_min: 36
+    y_max: 93
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              lambda: 'return id(ha_light_entity_state).state == "on";'
+            then:
+              - homeassistant.service:
+                  service: light.turn_off
+                  data:
+                    entity_id: light.${chakra_light_entity}
+            else:
+              - homeassistant.service:
+                  service: light.turn_on
+                  data:
+                    entity_id: light.${chakra_light_entity}
+        - component.update: s3_box_lcd
+
+  # Brightness minus
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_bri_minus
+    internal: true
+    x_min: 0
+    x_max: 36
+    y_min: 95
+    y_max: 120
+    on_press:
+      then:
+        - lambda: |-
+            int v = id(chakra_light_bri) - 10;
+            if(v < 5) v = 5;
+            id(chakra_light_bri) = v;
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              brightness_pct: "{{ chakra_bri }}"
+            variables:
+              chakra_bri: !lambda 'return std::to_string(id(chakra_light_bri));'
+        - component.update: s3_box_lcd
+
+  # Brightness plus
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_bri_plus
+    internal: true
+    x_min: 284
+    x_max: 320
+    y_min: 95
+    y_max: 120
+    on_press:
+      then:
+        - lambda: |-
+            int v = id(chakra_light_bri) + 10;
+            if(v > 100) v = 100;
+            id(chakra_light_bri) = v;
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              brightness_pct: "{{ chakra_bri }}"
+            variables:
+              chakra_bri: !lambda 'return std::to_string(id(chakra_light_bri));'
+        - component.update: s3_box_lcd
+
+  # Warm color temp
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_warm
+    internal: true
+    x_min: 0
+    x_max: 106
+    y_min: 155
+    y_max: 185
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+              color_temp_kelvin: "2700"
+        - component.update: s3_box_lcd
+
+  # Neutral color temp
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_neutral
+    internal: true
+    x_min: 107
+    x_max: 214
+    y_min: 155
+    y_max: 185
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+              color_temp_kelvin: "4000"
+        - component.update: s3_box_lcd
+
+  # Cool color temp
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_cool
+    internal: true
+    x_min: 215
+    x_max: 320
+    y_min: 155
+    y_max: 185
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+              color_temp_kelvin: "6500"
+        - component.update: s3_box_lcd
+
+  # Chakra color swatches (7 colors)
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_0
+    internal: true
+    x_min: 0
+    x_max: 46
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[255, 0, 0]"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_1
+    internal: true
+    x_min: 46
+    x_max: 91
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[255, 127, 0]"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_2
+    internal: true
+    x_min: 91
+    x_max: 137
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[255, 255, 0]"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_3
+    internal: true
+    x_min: 137
+    x_max: 183
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[0, 204, 0]"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_4
+    internal: true
+    x_min: 183
+    x_max: 228
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[0, 0, 255]"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_5
+    internal: true
+    x_min: 228
+    x_max: 274
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[75, 0, 130]"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_chakra_6
+    internal: true
+    x_min: 274
+    x_max: 320
+    y_min: 125
+    y_max: 150
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - homeassistant.service:
+            service: light.turn_on
+            data:
+              entity_id: light.${chakra_light_entity}
+            data_template:
+              rgb_color: "[238, 130, 238]"
+        - component.update: s3_box_lcd
+
+  # ── Media page handlers ──
+  - platform: touchscreen
+    page_id: media_page
+    name: Prev Track
+    internal: true
+    x_min: 0
+    x_max: 106
+    y_min: 66
+    y_max: 142
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.media_previous_track
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - homeassistant.service:
+                  service: media_player.media_previous_track
+                  data:
+                    entity_id: media_player.${friendly_name}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    name: Play Pause
+    internal: true
+    x_min: 107
+    x_max: 213
+    y_min: 66
+    y_max: 142
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.media_play_pause
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - if:
+                  condition:
+                    media_player.is_idle:
+                  then:
+                    - media_player.play
+                  else:
+                    - media_player.stop
+        - logger.log: "Play Pause pressed"
+
+  - platform: touchscreen
+    page_id: media_page
+    name: Next Track
+    internal: true
+    x_min: 214
+    x_max: 319
+    y_min: 66
+    y_max: 142
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.media_next_track
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - homeassistant.service:
+                  service: media_player.media_next_track
+                  data:
+                    entity_id: media_player.${friendly_name}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    name: Volume Minus
+    internal: true
+    x_min: 0
+    x_max: 106
+    y_min: 143
+    y_max: 219
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.volume_down
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - lambda: |-
+                  if (id(speaker_volume) > 0) id(speaker_volume) -= 1;
+              - script.execute: set_volume
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    name: Mute Media
+    internal: true
+    x_min: 107
+    x_max: 213
+    y_min: 143
+    y_max: 219
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - switch.toggle: ext_media_mute
+            else:
+              - switch.toggle: media_mute
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    name: Volume Plus
+    internal: true
+    x_min: 214
+    x_max: 319
+    y_min: 143
+    y_max: 219
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.volume_up
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - lambda: |-
+                  if (id(speaker_volume) < 10) id(speaker_volume) += 1;
+              - script.execute: set_volume
+        - component.update: s3_box_lcd
+
+  # Toggle INT/EXT mode
+  - platform: touchscreen
+    page_id: media_page
+    id: media_output_toggle
+    internal: true
+    x_min: 240
+    x_max: 315
+    y_min: 36
+    y_max: 65
+    on_click:
+      min_length: 0ms
+      max_length: 500ms
+      then:
+        - switch.toggle: output_audio
+        - component.update: s3_box_lcd
+        - script.execute: set_volume
+
+  # ── Screen saver settings handlers ──
+  - platform: touchscreen
+    page_id: ss_set_page
+    id: ss_toggle
+    internal: true
+    x_min: 250
+    x_max: 315
+    y_min: 49
+    y_max: 84
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: s_saver
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: ss_set_page
+    id: ss_wake_presc
+    internal: true
+    x_min: 250
+    x_max: 315
+    y_min: 95
+    y_max: 130
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: s_saver_presc
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: ss_set_page
+    id: ss_toggle_blank
+    internal: true
+    x_min: 250
+    x_max: 315
+    y_min: 141
+    y_max: 176
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: s_saver_mode
+        - component.update: s3_box_lcd
+
+  # ── Voice settings handlers ──
+  - platform: touchscreen
+    page_id: ww_set_page
+    id: ww_chang_hass
+    internal: true
+    x_min: 10
+    x_max: 315
+    y_min: 50
+    y_max: 80
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - select.operation:
+            id: wake_word_engine_location
+            operation: Next
+            cycle: true
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: ww_set_page
+    id: mute_response
+    internal: true
+    x_min: 250
+    x_max: 315
+    y_min: 80
+    y_max: 120
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: mute_response_switch
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: ww_set_page
+    id: ww_wake_sound
+    internal: true
+    x_min: 250
+    x_max: 315
+    y_min: 115
+    y_max: 155
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - switch.toggle: wake_sound
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: ww_set_page
+    id: ww_toggle_conv
+    internal: true
+    x_min: 250
+    x_max: 315
+    y_min: 150
+    y_max: 195
+    on_click:
+      - switch.toggle: display_conversation
+      - component.update: s3_box_lcd
+
+  # ── Screen saver wake ──
+  - platform: touchscreen
+    page_id: saver_page
+    id: ss_wake
+    internal: true
+    x_min: 0
+    x_max: 320
+    y_min: 0
+    y_max: 240
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - display.page.show: idle_page
+        - component.update: s3_box_lcd
+
+  # ── Device settings handlers ──
+  - id: s_default_bright_down
+    page_id: device_set_page
+    platform: touchscreen
+    internal: true
+    x_min: 165
+    x_max: 210
+    y_min: 58
+    y_max: 98
+    on_press:
+      then:
+        - lambda: |-
+            int default_bright = id(s_default_brightness).state - 5;
+            if (default_bright < 1) default_bright = 1;
+            auto call = id(s_default_brightness).make_call();
+            call.set_value(default_bright);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - id: s_default_bright_up
+    page_id: device_set_page
+    platform: touchscreen
+    internal: true
+    x_min: 265
+    x_max: 310
+    y_min: 58
+    y_max: 98
+    on_press:
+      then:
+        - lambda: |-
+            int default_bright = id(s_default_brightness).state + 5;
+            auto call = id(s_default_brightness).make_call();
+            call.set_value(default_bright);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: device_set_page
+    id: chang_display_format
+    x_min: 200
+    x_max: 310
+    y_min: 106
+    y_max: 136
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - select.operation:
+            id: time_format
+            operation: Next
+            cycle: true
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: device_set_page
+    id: temp_offset_minus
+    internal: true
+    x_min: 228
+    x_max: 268
+    y_min: 140
+    y_max: 175
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            auto call = id(temp_offset).make_call();
+            call.set_value(id(temp_offset).state - 0.5f);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: device_set_page
+    id: temp_offset_plus
+    internal: true
+    x_min: 270
+    x_max: 314
+    y_min: 140
+    y_max: 175
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            auto call = id(temp_offset).make_call();
+            call.set_value(id(temp_offset).state + 0.5f);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  # ── Chakra page touch handlers ──
+  # Threshold minus
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_thr_minus
+    internal: true
+    x_min: 0
+    x_max: 30
+    y_min: 172
+    y_max: 218
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            float v = id(chakra_detection_threshold) - 0.001f;
+            if (v < 0.0001f) v = 0.0001f;
+            id(chakra_detection_threshold) = v;
+        - component.update: s3_box_lcd
+
+  # Threshold plus
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_thr_plus
+    internal: true
+    x_min: 77
+    x_max: 107
+    y_min: 172
+    y_max: 218
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            float v = id(chakra_detection_threshold) + 0.001f;
+            if (v > 0.10f) v = 0.10f;
+            id(chakra_detection_threshold) = v;
+        - component.update: s3_box_lcd
+
+  # Hold minus
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_hold_minus
+    internal: true
+    x_min: 109
+    x_max: 139
+    y_min: 172
+    y_max: 218
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_hold_frames) - 2;
+            if (v < 0) v = 0;
+            id(chakra_hold_frames) = v;
+        - component.update: s3_box_lcd
+
+  # Hold plus
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_hold_plus
+    internal: true
+    x_min: 184
+    x_max: 214
+    y_min: 172
+    y_max: 218
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_hold_frames) + 2;
+            if (v > 30) v = 30;
+            id(chakra_hold_frames) = v;
+        - component.update: s3_box_lcd
+
+  # Light brightness minus
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_bri_minus
+    internal: true
+    x_min: 215
+    x_max: 245
+    y_min: 172
+    y_max: 218
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_light_bri) - 10;
+            if (v < 0) v = 0;
+            id(chakra_light_bri) = v;
+        - component.update: s3_box_lcd
+
+  # Light brightness plus
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_bri_plus
+    internal: true
+    x_min: 289
+    x_max: 319
+    y_min: 172
+    y_max: 218
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_light_bri) + 10;
+            if (v > 100) v = 100;
+            id(chakra_light_bri) = v;
+        - component.update: s3_box_lcd
+
+  # Toggle switch (title band)
+  - platform: touchscreen
+    page_id: chakra_page
+    id: chakra_title_toggle
+    internal: true
+    x_min: 2
+    x_max: 64
+    y_min: 0
+    y_max: 30
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - if:
+            condition:
+              lambda: return !id(chakra_transitioning);
+            then:
+              - switch.toggle: chakra_mode_switch
+
+  # ── Chakra settings page handlers ──
+  - platform: touchscreen
+    page_id: chakra_set_page
+    id: chakra_set_sens_minus
+    internal: true
+    x_min: 5
+    x_max: 47
+    y_min: 120
+    y_max: 165
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            float v = id(chakra_detection_threshold) - 0.001f;
+            if (v < 0.0001f) v = 0.0001f;
+            id(chakra_detection_threshold) = v;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: chakra_set_page
+    id: chakra_set_sens_plus
+    internal: true
+    x_min: 60
+    x_max: 102
+    y_min: 120
+    y_max: 165
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            float v = id(chakra_detection_threshold) + 0.001f;
+            if (v > 0.10f) v = 0.10f;
+            id(chakra_detection_threshold) = v;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: chakra_set_page
+    id: chakra_set_hold_minus
+    internal: true
+    x_min: 112
+    x_max: 154
+    y_min: 120
+    y_max: 165
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_hold_frames) - 2;
+            if (v < 0) v = 0;
+            id(chakra_hold_frames) = v;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: chakra_set_page
+    id: chakra_set_hold_plus
+    internal: true
+    x_min: 167
+    x_max: 209
+    y_min: 120
+    y_max: 165
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_hold_frames) + 2;
+            if (v > 30) v = 30;
+            id(chakra_hold_frames) = v;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: chakra_set_page
+    id: chakra_set_bri_minus
+    internal: true
+    x_min: 219
+    x_max: 261
+    y_min: 120
+    y_max: 165
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_light_bri) - 10;
+            if (v < 0) v = 0;
+            id(chakra_light_bri) = v;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: chakra_set_page
+    id: chakra_set_bri_plus
+    internal: true
+    x_min: 274
+    x_max: 316
+    y_min: 120
+    y_max: 165
+    on_click:
+      min_length: 10ms
+      max_length: 500ms
+      then:
+        - lambda: |-
+            int v = id(chakra_light_bri) + 10;
+            if (v > 100) v = 100;
+            id(chakra_light_bri) = v;
+        - component.update: s3_box_lcd
+
+################## config end ############################
