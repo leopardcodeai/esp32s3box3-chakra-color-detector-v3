@@ -1,6 +1,33 @@
 # ESP32-S3-BOX-3 Custom ESPHome — Chakra Analyser Edition
 
-ESPHome firmware for the **Espressif ESP32-S3-BOX-3** with Sensor Dock, built on top of the [BigBobbas custom config](https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome). Extends the original with a **Chakra Frequency Analyser** page that listens to the built-in MEMS microphones, detects dominant singing-bowl frequencies via FFT, maps them to the 7 chakras, and pushes the result to Home Assistant.
+ESPHome firmware for the **Espressif ESP32-S3-BOX-3** with Sensor Dock, built on top of the [BigBobbas custom config](https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome). Extends the original with a **Chakra Frequency Analyser** page that listens to the built-in MEMS microphones, detects dominant singing-bowl frequencies via FFT, maps them to the 7 chakras, and in the current `esp32s3box3_v4.yaml` flow drives Hue lights directly through the local Hue Bridge.
+
+## Current v4 Light-Control Pipeline
+
+`esp32s3box3_v4.yaml` is the current direct-light-control configuration. In this mode the light path does **not** depend on the Home Assistant light API.
+
+```
+Mic -> FFT -> chakra_index -> chakra_send_to_ha
+                              |
+                              +-> RGB from ChakraAnalyser::get_info()
+                              |
+                              +-> RGB -> HSV conversion
+                              |
+                              +-> light_set_color
+                              |
+                              +-> light_send_to_all
+                              |
+                              +-> HTTP PUT http://<bridge>/api/<key>/lights/<id>/state
+                              |
+                              +-> Hue lights 5,6,8,9,18,20,21
+```
+
+Notes:
+
+- The current lighting path is `Chakra -> ESPHome -> Hue Bridge -> Hue lights`.
+- `chakra_update_ha_sensor` still posts a sensor update to Home Assistant if the host is reachable, but that sensor post is **not** the light-control path.
+- `light_control_mode: hue` must be active in `device_config.yaml`.
+- `hue_light_entity` must resolve to a comma-separated list of numeric Hue light IDs.
 
 ### v3.1 — Raw Audio Streaming + Multi-VM Pipeline
 
@@ -192,15 +219,19 @@ The ESP32-S3 has four strapping pins that affect boot behavior. All are used by 
 
 | File | Purpose |
 |------|---------|
-| `esp32s3box3.yaml` | Main ESPHome configuration (~4 400 lines) |
+| `esp32s3box3.yaml` | Legacy main ESPHome configuration |
+| `esp32s3box3_v4.yaml` | Current direct Hue Bridge configuration with pipeline diagnostics |
 | `device_config.yaml` | **All user-configurable settings** — edit this first |
 | `chakra_component.h` | Self-contained C++ FFT analyser (512-pt Cooley-Tukey) |
+| `hue_http_helpers.h` | Shared ESP-IDF HTTP helper that captures Hue response bodies without post-`perform()` read errors |
 | `aws_audio_streamer.h` | Double-buffered PCM streamer — FreeRTOS background HTTP POST |
 | `vm_scripts/audio_fft_relay.py` | **Relay hub** — receives PCM, runs FFT, SSE broadcast + Bedrock |
 | `vm_scripts/chakra_listener.py` | **HA listener** — subscribes to SSE, controls local HA light |
 | `secrets.yaml` | Wi-Fi credentials — **never commit real values** |
 | `secrets.example.yaml` | CI placeholder — checked in |
 | `tools/pin_check.py` | GPIO conflict + strapping-pin validator |
+| `tools/substitution_check.py` | Guard against self-referential substitutions such as `foo: ${foo}` |
+| `tools/hue_bridge_test.py` | Inspect and validate configured Hue light targets from the host |
 | `Makefile` | All dev commands |
 
 ---
@@ -225,8 +256,9 @@ A dedicated **Chakra** page (reachable from the Settings nav) replaces the Voice
 | 5 | Third Eye | 1 024 – 2 048 Hz | 🟣 `#4B0082` |
 | 6 | Crown | 2 048 – 4 096 Hz | 🟤 `#EE82EE` |
 
-4. The active chakra name + hex colour are pushed to HA as `text_sensor` entities (`chakra_active_name`, `chakra_active_color`).
-5. The `chakra_send_to_ha` script calls `light.turn_on` on your configured HA light entity with the matching RGB values.
+4. The active chakra name + hex colour are published locally as `text_sensor` entities (`chakra_active_name`, `chakra_active_color`).
+5. In `light_control_mode: hue`, `chakra_send_to_ha` converts the chakra RGB colour to Hue HSV and calls the Hue Bridge directly for each configured light ID.
+6. In `light_control_mode: HA API`, the fallback path still uses `light.turn_on` on the configured Home Assistant entity.
 
 ### Sensitivity tuning
 
@@ -286,15 +318,127 @@ In `device_config.yaml`, update the substitutions:
 substitutions:
   chakra_light_entity: "your_chakra_light"   # without the "light." prefix
   aws_relay_url: "https://your-tunnel.trycloudflare.com"  # optional: for AWS mode
+  light_control_mode: hue
+  hue_light_entity: "5,6,8,9,18,20,21"
 ```
 
 ### 3. Compile
 
 ```bash
-make validate   # quick schema check
-make flash      # compile + flash via USB-C (first time)
-make ota        # compile + flash via Wi-Fi (subsequent)
+make validate
+make check
+make flash
+make ota
 ```
+
+## Pipeline Test Procedure
+
+Use this procedure to isolate failures in the exact order they can occur.
+
+### 1. Static config guards
+
+```bash
+make subst-check CONFIG=esp32s3box3_v4.yaml
+make validate CONFIG=esp32s3box3_v4.yaml
+```
+
+Expected result:
+
+- no self-referential substitutions
+- valid ESPHome config
+
+### 2. Host -> Hue Bridge target check
+
+```bash
+make hue-bridge-test
+```
+
+Expected result:
+
+- all configured light IDs exist
+- all are `reachable=true`
+- all expose color control (`has_gamut=True`)
+
+Optional write/readback test from the host:
+
+```bash
+make hue-write-test
+```
+
+Notes:
+
+- A `write-test` can warn about a hue readback mismatch even when the write succeeded. Many Hue lamps remap requested hue values to their own reachable gamut.
+- The important pass criteria are: HTTP `200`, `reachable=True`, `colormode=hs`, brightness near target, saturation near target.
+
+### 3. Device -> Hue Bridge direct payload test
+
+After flashing `esp32s3box3_v4.yaml`, use these diagnostic buttons on the device:
+
+- `Test Hue Connection`
+- `Inspect Hue Targets`
+- `Run Hue Pipeline Self-Test`
+- `Test Hue Payload Sweep`
+
+Expected logs:
+
+- `hue_config: Configured Hue targets: 5,6,8,9,18,20,21`
+- `test_hue: Target light: 5`
+- `hue_inspect: Light <id> status 200: ...`
+- `hue_test: PASS light <id> -> ...`
+- `hue_response: Light <id>: [{"success":...}]`
+
+If you see `Hue target IDs are unresolved: ${hue_light_entity}`, the build is invalid and must not be deployed.
+
+### 3a. Full regression run
+
+This combines the host bridge verification with the on-device self-test button:
+
+```bash
+make hue-full-test
+```
+
+This is the fastest reusable regression check after any YAML, substitution, or Hue transport change.
+
+### 4. Chakra -> Hue end-to-end test
+
+Use the device button `Test Chakra Hue Pipeline`.
+
+What it does:
+
+- injects chakra indices `0..6`
+- runs the same `chakra_send_to_ha` script used by live FFT detections
+- verifies state via `light_get_state`
+
+Expected logs:
+
+- `pipeline_test: Chakra pipeline step <n> -> <name>`
+- `chakra_send: Condition check: light_control_mode == 'hue' ? TRUE`
+- `light_color: Setting color - H:... S:... B:...`
+- `hue_send: Light <id> - URL: http://<bridge>/api/<key>/lights/<id>/state`
+
+### 5. Live microphone / FFT verification
+
+Finally enable `Chakra Mode`, produce a known tone, and verify:
+
+- `chakra_send` appears only when a new chakra is detected
+- `hue_send` follows immediately after `chakra_send`
+- the room lights change
+
+If step 2 passes but step 3 fails, the issue is inside the ESPHome Hue transport path.
+If step 3 passes but step 5 fails, the issue is in the FFT/chakra trigger path.
+
+## Known Failure Signatures
+
+- `Hue target IDs are unresolved: ${hue_light_entity}`
+  The firmware still contains an unresolved substitution. Run `make subst-check CONFIG=esp32s3box3_v4.yaml` and reflash.
+- `light_control_mode` is not `hue`
+  The device is on the wrong branch of the pipeline and will not use the direct Hue Bridge transport.
+- Host tests pass, but `Test Hue Connection` fails on-device
+  The problem is inside the ESP-side HTTP path, Wi-Fi path, or embedded request formatting.
+- `Test Hue Connection` and `Run Hue Pipeline Self-Test` pass, but live Chakra mode does not change lights
+  The issue is no longer the Hue bridge. Focus on FFT detection, debounce, `chakra_index`, and whether `chakra_send_to_ha` is firing.
+- `write-test` warns that `hue` readback differs from the requested hue
+  This is normal for some lamps and does not automatically indicate a failure as long as the bridge accepted the request and the light entered `hs` mode.
 
 ---
 
@@ -313,8 +457,8 @@ After adoption the device exposes:
 
 ## Build environment
 
-- ESPHome 2026.2.0
-- Framework: `esp-idf` (ESP-IDF 5.5.2)
+- ESPHome 2026.3.0
+- Framework: `esp-idf` (ESP-IDF 5.5.3)
 - PlatformIO build — all remote assets (fonts, images, sounds) fetched from GitHub raw URLs at compile time; no local clone of the upstream repo required.
 
 ---

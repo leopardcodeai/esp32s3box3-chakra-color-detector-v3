@@ -11,15 +11,24 @@ substitutions:
   friendly_name: ESP32-S3-Box-3   # Display name in Home Assistant
 
   # ── Home Assistant ────────────────────────────────────────────────────────
-  home_assistant_host: http://192.168.0.244:8123
+  home_assistant_host: http://192.168.178.133:8123
+  ha_token: !secret ha_token
 
   # ── HA entities ───────────────────────────────────────────────────────────
   external_media_player: spotify_dr_eng_alexander_brunker   # → media_player.<this>
   chakra_light_entity: living_room                  # → light.<this>  (NO 'light.' prefix!)
   ha_timer_entity: timer.home_assistant_timer       # full entity_id incl. domain
 
+  # ── Hue Bridge (alternative to HA for light control) ─────────────────────
+  # light_control_mode: ha_api    # Use Home Assistant API (default)
+  # light_control_mode: hue       # Use Hue Bridge local HTTP API
+  light_control_mode: hue
+  hue_light_entity: "5,6,8,9,18,20,21"   # Hue light IDs (comma-separated) - Klangraum room
+  hue_bridge_ip: !secret hue_bridge_ip
+  hue_api_key: !secret hue_api_key
+
   # ── AWS Bedrock ─────────────────────────────────────────────────────────
-  aws_relay_url: "https://dining-acquisitions-stylus-nail.trycloudflare.com"
+  aws_relay_url: "https://diverse-specially-safer-seminars.trycloudflare.com"
 
   # ── Voice / TTS ───────────────────────────────────────────────────────────
   tts_voice_speed: "16000"   # 16000 = Piper (free, local)  |  24000 = NabuCasa  |  44100 = ElevenLabs
