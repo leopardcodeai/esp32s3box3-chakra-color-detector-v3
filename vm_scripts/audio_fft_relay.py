@@ -29,9 +29,11 @@ import struct
 import threading
 import time
 import traceback
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 
+import boto3
 import numpy as np
 
 # ═══════════════════════════════════════════════════════════════════
@@ -62,7 +64,22 @@ NOTE_TO_CHAKRA = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 6, 6]
 FFT_N = 512
 SAMPLE_RATE = 16000
 FREQ_RES = SAMPLE_RATE / FFT_N   # 31.25 Hz/bin
-THRESHOLD_DB = -45.0
+THRESHOLD_DB = -65.0
+TARGET_LUFS = -16.0    # loudness normalization target (EBU R128 broadcast level)
+
+
+def loudness_normalize(samples_f32: np.ndarray, target_lufs: float = TARGET_LUFS) -> tuple[np.ndarray, float]:
+    """Normalize float32 samples to target LUFS. Returns (normalized, gain_db)."""
+    rms = np.sqrt(np.mean(samples_f32 ** 2))
+    if rms < 1e-9:
+        return samples_f32, 0.0
+    current_lufs = 20.0 * np.log10(rms + 1e-9)
+    gain_db = target_lufs - current_lufs
+    gain_linear = 10.0 ** (gain_db / 20.0)
+    normalized = samples_f32 * gain_linear
+    # Soft-clip to prevent overflow
+    normalized = np.clip(normalized, -1.0, 1.0)
+    return normalized, gain_db
 
 
 class ChakraFFTAnalyser:
@@ -82,11 +99,14 @@ class ChakraFFTAnalyser:
             frame = self.accum[:FFT_N].astype(np.float32) / 32768.0
             self.accum = self.accum[FFT_N:]
 
-            # RMS + dB
+            # RMS + dB (pre-normalization, for gating)
             rms = np.sqrt(np.mean(frame ** 2))
             signal_db = 20.0 * np.log10(rms + 1e-9)
             if signal_db < THRESHOLD_DB:
                 continue
+
+            # Loudness normalization — bring all frames to consistent level
+            frame, gain_db = loudness_normalize(frame)
 
             # Hann window + FFT
             window = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(FFT_N) / (FFT_N - 1)))
@@ -202,11 +222,171 @@ analyser = ChakraFFTAnalyser()
 sse_hub = SSEHub()
 raw_hub = SSEHub()
 bedrock_client = None
+s3_client = None
+cw_client = None
 last_bedrock_call = 0.0
 BEDROCK_RATE_LIMIT = 3.0   # seconds between Bedrock invocations
 
+S3_BUCKET = "chakra-audio-archive"
+S3_CHUNK_SECONDS = 3       # bundle into 3s WAV files
+S3_REGION = "eu-central-1"
+CW_NAMESPACE = "ChakraAudio"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  CloudWatch Metrics Publisher
+# ═══════════════════════════════════════════════════════════════════
+class CloudWatchPublisher:
+    """Batches and publishes metrics to CloudWatch every 10s."""
+
+    def __init__(self, namespace: str = CW_NAMESPACE):
+        self.namespace = namespace
+        self._metrics: list[dict] = []
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._thread.start()
+
+    def put(self, name: str, value: float, unit: str = "None", dimensions: list[dict] | None = None):
+        metric = {
+            "MetricName": name,
+            "Value": float(value),
+            "Unit": unit,
+            "Timestamp": time.time(),
+        }
+        if dimensions:
+            metric["Dimensions"] = dimensions
+        with self._lock:
+            self._metrics.append(metric)
+
+    def _flush_loop(self):
+        global cw_client
+        while self._running:
+            time.sleep(10)
+            with self._lock:
+                if not self._metrics:
+                    continue
+                batch = self._metrics[:20]  # CW max 20 per call
+                self._metrics = self._metrics[20:]
+
+            if cw_client is None:
+                try:
+                    cw_client = boto3.client("cloudwatch", region_name=S3_REGION)
+                except Exception as e:
+                    print(f"[cw] init failed: {e}")
+                    continue
+
+            cw_data = []
+            for m in batch:
+                entry = {
+                    "MetricName": m["MetricName"],
+                    "Value": m["Value"],
+                    "Unit": m["Unit"],
+                }
+                if "Dimensions" in m:
+                    entry["Dimensions"] = m["Dimensions"]
+                cw_data.append(entry)
+
+            try:
+                cw_client.put_metric_data(Namespace=self.namespace, MetricData=cw_data)
+            except Exception as e:
+                print(f"[cw] publish failed: {e}")
+
+
+cw_publisher = CloudWatchPublisher()
+
 AGENT_ID = "FEFWNRBPIQ"
 AGENT_ALIAS_ID = "TSTALIASID"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  S3 Audio Archiver — bundles PCM into WAV and uploads
+# ═══════════════════════════════════════════════════════════════════
+class S3AudioArchiver:
+    """Accumulates PCM chunks and uploads as WAV to S3 every N seconds."""
+
+    def __init__(self, bucket: str, chunk_seconds: int = 30):
+        self.bucket = bucket
+        self.chunk_seconds = chunk_seconds
+        self.sample_rate = 16000
+        self.bits = 16
+        self.channels = 1
+        self._buffer = bytearray()
+        self._chunk_start = time.time()
+        self._lock = threading.Lock()
+        self._total_uploaded = 0
+
+    def push(self, pcm_data: bytes):
+        """Add PCM data. Auto-uploads when chunk_seconds worth is buffered."""
+        with self._lock:
+            self._buffer.extend(pcm_data)
+            bytes_per_sec = self.sample_rate * (self.bits // 8) * self.channels
+            if len(self._buffer) >= bytes_per_sec * self.chunk_seconds:
+                buf = bytes(self._buffer)
+                self._buffer.clear()
+                start = self._chunk_start
+                self._chunk_start = time.time()
+                threading.Thread(
+                    target=self._upload, args=(buf, start), daemon=True
+                ).start()
+
+    def _upload(self, pcm_bytes: bytes, start_time: float):
+        global s3_client
+        if s3_client is None:
+            try:
+                s3_client = boto3.client("s3", region_name=S3_REGION)
+            except Exception as e:
+                print(f"[s3] init failed: {e}")
+                return
+
+        # Loudness-normalize PCM before saving
+        samples_f32 = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        normalized, gain_db = loudness_normalize(samples_f32)
+        pcm_normalized = (normalized * 32767.0).astype(np.int16).tobytes()
+
+        # Build WAV in memory
+        wav_buf = BytesIO()
+        data_size = len(pcm_normalized)
+        # WAV header (44 bytes)
+        wav_buf.write(b"RIFF")
+        wav_buf.write(struct.pack("<I", 36 + data_size))
+        wav_buf.write(b"WAVE")
+        wav_buf.write(b"fmt ")
+        wav_buf.write(struct.pack("<I", 16))  # chunk size
+        wav_buf.write(struct.pack("<H", 1))   # PCM format
+        wav_buf.write(struct.pack("<H", self.channels))
+        wav_buf.write(struct.pack("<I", self.sample_rate))
+        wav_buf.write(struct.pack("<I", self.sample_rate * self.channels * (self.bits // 8)))
+        wav_buf.write(struct.pack("<H", self.channels * (self.bits // 8)))
+        wav_buf.write(struct.pack("<H", self.bits))
+        wav_buf.write(b"data")
+        wav_buf.write(struct.pack("<I", data_size))
+        wav_buf.write(pcm_normalized)
+        wav_buf.seek(0)
+
+        ts = time.strftime("%Y/%m/%d/%H-%M-%S", time.gmtime(start_time))
+        key = f"audio/{ts}.wav"
+        try:
+            s3_client.upload_fileobj(wav_buf, self.bucket, key)
+            duration = len(pcm_bytes) / (self.sample_rate * 2)
+            self._total_uploaded += 1
+            cw_publisher.put("S3Uploads", 1.0, "Count")
+            cw_publisher.put("S3AudioDurationSec", duration, "Seconds")
+            print(f"[s3] ✓ s3://{self.bucket}/{key} ({duration:.1f}s, gain {gain_db:+.1f}dB, #{self._total_uploaded})")
+        except Exception as e:
+            print(f"[s3] ✗ upload failed: {e}")
+
+    @property
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "buffered_seconds": len(self._buffer) / (self.sample_rate * 2),
+                "total_uploaded": self._total_uploaded,
+                "bucket": self.bucket,
+            }
+
+
+s3_archiver = S3AudioArchiver(S3_BUCKET, S3_CHUNK_SECONDS)
 
 
 def invoke_bedrock_async(chakra_result: dict):
@@ -248,6 +428,51 @@ def invoke_bedrock_async(chakra_result: dict):
     threading.Thread(target=_invoke, daemon=True).start()
 
 
+# ─── HA sensor.chakra_aws helper ────────────────────────────────────
+HA_URL = "http://192.168.0.244:8123"
+HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJiMmE2Y2JjNTQ0MmE0M2EwYWVkNWUyZTViMDg0NGQyNCIsImlhdCI6MTc3MzMyNzI0MSwiZXhwIjoyMDg4Njg3MjQxfQ.9bWx78GEMWjz7j440DvNRQCGajDXL8B5SMzdxpGsuhU"
+
+CHAKRA_COLORS = {
+    "Root":        {"hex": "FF0000", "rgb": [255, 0, 0]},
+    "Sacral":      {"hex": "FF8C00", "rgb": [255, 140, 0]},
+    "Solar Plexus":{"hex": "FFD700", "rgb": [255, 215, 0]},
+    "Heart":       {"hex": "00FF00", "rgb": [0, 255, 0]},
+    "Throat":      {"hex": "00BFFF", "rgb": [0, 191, 255]},
+    "Third Eye":   {"hex": "4B0082", "rgb": [75, 0, 130]},
+    "Crown":       {"hex": "8B00FF", "rgb": [139, 0, 255]},
+}
+
+def update_ha_sensor_async(det: dict):
+    """POST sensor.chakra_aws to HA REST API (non-blocking)."""
+    def _post():
+        try:
+            name = det.get("chakra_name", "Unknown")
+            colors = CHAKRA_COLORS.get(name, {"hex": "FFFFFF", "rgb": [255, 255, 255]})
+            payload = json.dumps({
+                "state": name,
+                "attributes": {
+                    "friendly_name": "Chakra AWS",
+                    "color": colors["hex"],
+                    "rgb": colors["rgb"],
+                    "frequency": det.get("frequency", 0),
+                }
+            }).encode()
+            req = urllib.request.Request(
+                f"{HA_URL}/api/states/sensor.chakra_aws",
+                data=payload,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {HA_TOKEN}",
+                },
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            print(f"[ha] sensor.chakra_aws → {name} ({resp.status})")
+        except Exception as e:
+            print(f"[ha] sensor.chakra_aws error: {e}")
+    threading.Thread(target=_post, daemon=True).start()
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  HTTP Handler
 # ═══════════════════════════════════════════════════════════════════
@@ -263,6 +488,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "subscribers": sse_hub.count,
                 "raw_subscribers": raw_hub.count,
+                "s3": s3_archiver.stats,
             })
 
         elif self.path == "/aws/audio/live":
@@ -284,11 +510,23 @@ class RelayHandler(BaseHTTPRequestHandler):
         elif self.path == "/aws/chakra":
             self._handle_chakra(body)
 
+        elif self.path == "/aws/sensors":
+            self._handle_sensors(body)
+
         else:
             self._json_response(404, {"error": "not found"})
 
     def _handle_audio(self, pcm_data: bytes):
-        """Receive raw PCM, run FFT, broadcast results."""
+        """Receive raw PCM, run FFT, broadcast results, archive to S3."""
+        # Archive to S3 (non-blocking, buffers internally)
+        s3_archiver.push(pcm_data)
+
+        # CloudWatch: audio chunk received + RMS level
+        samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+        rms_db = 20.0 * np.log10(np.sqrt(np.mean(samples ** 2)) + 1e-9)
+        cw_publisher.put("AudioChunksReceived", 1.0, "Count")
+        cw_publisher.put("AudioLevelDB", rms_db, "None")
+
         # Broadcast raw PCM as base64 for clients wanting own FFT
         if raw_hub.count > 0:
             raw_event = {
@@ -307,6 +545,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         for det in detections:
             sse_hub.broadcast(det)
             invoke_bedrock_async(det)
+            update_ha_sensor_async(det)
+            cw_publisher.put("ChakraDetections", 1.0, "Count",
+                             [{"Name": "Chakra", "Value": det["chakra_name"]}])
+            cw_publisher.put("DetectedFrequencyHz", det["frequency"], "None")
+            cw_publisher.put("DetectedSignalDB", det["signal_db"], "None")
             print(f"[fft] {det['chakra_name']} @ {det['frequency']} Hz "
                   f"({det['signal_db']} dB) → {sse_hub.count} subscribers")
 
@@ -338,6 +581,59 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"ok": True})
         except Exception as e:
             self._json_response(400, {"error": str(e)})
+
+    def _handle_sensors(self, body: bytes):
+        """Receive sensor telemetry, publish to CloudWatch, store in S3."""
+        try:
+            data = json.loads(body)
+            dims = [{"Name": "Device", "Value": "ESP32-S3-BOX-3"}]
+
+            if "temperature" in data:
+                cw_publisher.put("Temperature", float(data["temperature"]), "None", dims)
+            if "humidity" in data:
+                cw_publisher.put("Humidity", float(data["humidity"]), "None", dims)
+            if "presence" in data:
+                cw_publisher.put("Presence", 1.0 if data["presence"] else 0.0, "None", dims)
+            if "chakra_mode" in data:
+                cw_publisher.put("ChakraMode", 1.0 if data["chakra_mode"] else 0.0, "None", dims)
+            if "battery_percent" in data:
+                cw_publisher.put("BatteryPercent", float(data["battery_percent"]), "Percent", dims)
+            if "wifi_signal_db" in data:
+                cw_publisher.put("WiFiSignalDB", float(data["wifi_signal_db"]), "None", dims)
+
+            # Store to S3 as JSON
+            data["timestamp"] = time.time()
+            data["timestamp_iso"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            threading.Thread(target=self._store_telemetry_s3, args=(data,), daemon=True).start()
+
+            print(f"[sensors] temp={data.get('temperature','?')}°C "
+                  f"humi={data.get('humidity','?')}% "
+                  f"presence={data.get('presence','?')} "
+                  f"chakra={data.get('chakra_mode','?')}")
+            self._json_response(200, {"ok": True})
+        except Exception as e:
+            self._json_response(400, {"error": str(e)})
+
+    @staticmethod
+    def _store_telemetry_s3(data: dict):
+        global s3_client
+        if s3_client is None:
+            try:
+                s3_client = boto3.client("s3", region_name=S3_REGION)
+            except Exception as e:
+                print(f"[s3] init failed: {e}")
+                return
+        ts = time.strftime("%Y/%m/%d/%H-%M-%S", time.gmtime(data["timestamp"]))
+        key = f"telemetry/{ts}.json"
+        try:
+            s3_client.put_object(
+                Bucket=S3_BUCKET, Key=key,
+                Body=json.dumps(data).encode(),
+                ContentType="application/json",
+            )
+            print(f"[s3] ✓ s3://{S3_BUCKET}/{key}")
+        except Exception as e:
+            print(f"[s3] ✗ telemetry upload: {e}")
 
     def _handle_sse(self, hub: SSEHub):
         """Stream Server-Sent Events to subscriber."""

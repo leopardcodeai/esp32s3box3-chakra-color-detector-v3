@@ -1,13 +1,14 @@
 # ESPHome Development Makefile
-# Usage: make <target>  (default config: esp32s3box3.yaml)
+# Usage: make <target>  (default config: esp32s3box3_v4.yaml)
 
-CONFIG    ?= esp32s3box3.yaml
+CONFIG    ?= esp32s3box3_v4.yaml
 PORT      ?= /dev/cu.usbserial-*
 ESPHOME   := esphome
 
 .PHONY: help compile flash logs validate clean dashboard upload \
-        secrets-check yaml-check check diff ralph ralph-init \
-        push tags status feature fix pr merge pins
+        secrets-check yaml-check subst-check hue-bridge-test hue-write-test \
+        hue-full-test check diff \
+        ralph ralph-init push tags status feature fix pr merge pins
 
 # ──────────────────────────────────────────────
 #  Default: show help
@@ -23,7 +24,11 @@ help:
 	@echo "  make logs             Stream device logs"
 	@echo "  make validate         YAML schema validation only"
 	@echo "  make yaml-check       Python YAML syntax check (fast, no ESPHome)"
+	@echo "  make subst-check      Detect self-referential substitutions before compile"
 	@echo "  make secrets-check    Confirm secrets.yaml has real values (not placeholders)"
+	@echo "  make hue-bridge-test  Inspect configured Hue targets against the bridge"
+	@echo "  make hue-write-test   Write + verify a direct Hue payload on all configured targets"
+	@echo "  make hue-full-test    Host bridge test + on-device self-test button"
 	@echo "  make pins             GPIO conflict + strapping pin validation (run before flash!)"
 	@echo "  make check            Run all pre-flight checks (yaml + pins + validate)"
 	@echo "  make clean            Remove build cache (.esphome/)"
@@ -44,13 +49,16 @@ help:
 # ──────────────────────────────────────────────
 #  Core ESPHome commands
 # ──────────────────────────────────────────────
-compile:
+fix-espidf-efuse:
+	@python3 tools/fix_espidf_efuse_duplicate.py 2>/dev/null || true
+
+compile: fix-espidf-efuse
 	$(ESPHOME) compile $(CONFIG)
 
-flash: pins
+flash: pins fix-espidf-efuse
 	$(ESPHOME) run $(CONFIG)
 
-ota: pins
+ota: pins fix-espidf-efuse
 	$(ESPHOME) run $(CONFIG) --no-logs
 
 logs:
@@ -91,7 +99,20 @@ secrets-check:
 		echo "  ⚠ chakra_light_entity is still the placeholder — update substitutions in $(CONFIG)"; \
 	fi
 
-check: yaml-check secrets-check pins validate
+subst-check:
+	@echo "→ Substitution guard check..."
+	@python3 tools/substitution_check.py $(CONFIG) device_config.yaml
+
+hue-bridge-test:
+	@python3 tools/hue_bridge_test.py inspect
+
+hue-write-test:
+	@python3 tools/hue_bridge_test.py write-test
+
+hue-full-test:
+	@python3 tools/hue_bridge_test.py full
+
+check: yaml-check subst-check secrets-check pins validate
 	@echo ""
 	@echo "✓ All pre-flight checks passed."
 

@@ -1,0 +1,57 @@
+## Minimal safe-mode config — proves hardware + ESPHome 2026.4 + IDF 5.5.4 can boot.
+## Board + PSRAM + WiFi + Logger + Backlight only. No display driver, no audio, no FFT.
+
+esphome:
+  name: esp32-s3box-3-safe
+  friendly_name: ESP32-S3-Box-3 (Safe Mode)
+  min_version: 2025.2.0
+
+esp32:
+  board: esp32s3box
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+
+# PSRAM removed for diagnostic — suspected boot-hang cause under IDF 5.5.4
+# psram:
+#   mode: octal
+#   speed: 80MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: esp32-s3box-3-safe
+    password: s3box123
+
+captive_portal:
+
+# Backlight — so we can SEE a boot happened even without display driver
+output:
+  - platform: ledc
+    pin:
+      number: GPIO47
+    id: backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Backlight"
+    id: backlight
+    restore_mode: ALWAYS_ON
+    default_transition_length: 0s
+
+# Strapping pin warnings (BOX-3 uses these)
+# (No components bound here — just acknowledging the board uses them)
