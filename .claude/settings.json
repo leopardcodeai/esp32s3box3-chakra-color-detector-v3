@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'INPUT=$(cat); FILE=$(echo \"$INPUT\" | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get(\\\"tool_input\\\",{}).get(\\\"file_path\\\",\\\"\\\"))\" 2>/dev/null); if [[ \"$FILE\" == *.md ]] && [[ \"$FILE\" != */README.md ]] && [[ \"$FILE\" != */CLAUDE.md ]] && [[ \"$FILE\" != */.github/* ]]; then echo \"[Hook] Blocked: $FILE is a markdown file. Do not create markdown planning/notes files in the repo. Use session state (~/.copilot/session-state/) or SQL for notes.\" >&2; exit 2; fi'",
+            "timeout": 5
+          }
+        ],
+        "description": "Block creation of markdown files in the repo (except README.md, CLAUDE.md, .github/) \u2014 keeps planning notes out of the codebase"
+      }
+    ]
+  }
+}

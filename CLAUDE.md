@@ -1,4 +1,4 @@
-# ESP32-S3-BOX-3 — Chakra Analyser Edition
+# esp32s3box3-chakra-color-detector-v3
 
 ESPHome firmware project for the **ESP32-S3-BOX-3**. The device runs a Chakra Frequency Analyser that maps singing-bowl frequencies (via FFT) to the 7 chakras and integrates deeply with Home Assistant for media, lights, and timers.
 
@@ -52,7 +52,7 @@ All new work goes through the PR workflow — never commit directly to main.
 **Edit `device_config.yaml` only** — never touch `esp32s3box3.yaml` for user settings.
 
 ```yaml
-home_assistant_host: http://192.168.0.244:8123
+home_assistant_host: !secret home_assistant_host
 external_media_player: music_assistant_airplay   # → media_player.<this>
 chakra_light_entity: living_room                  # → light.<this>  (no 'light.' prefix)
 ha_timer_entity: timer.home_assistant_timer       # full entity_id

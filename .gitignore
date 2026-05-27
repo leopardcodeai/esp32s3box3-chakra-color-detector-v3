@@ -10,3 +10,7 @@
 /.agent/logs/
 /.agent/history/
 .DS_Store
+
+# Backup / temp files — never commit
+*.bak
+*.pre-rewrite

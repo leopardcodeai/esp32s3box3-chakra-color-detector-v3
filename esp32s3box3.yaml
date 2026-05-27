@@ -34,7 +34,7 @@ esphome:
               id: speaker_media_player
               volume: 0
   project:
-    name: "BigBobbas.s3box"
+    name: "chakra-color-detector.v3"
     version: "2024.09.02"
 esp32:
   board: esp32s3box
@@ -51,6 +51,8 @@ psram:
   speed: 80MHz
 
 api:
+  encryption:
+    key: !secret api_encryption_key
   on_client_connected:
     - lambda: |-
         id(api_connection) = true;
