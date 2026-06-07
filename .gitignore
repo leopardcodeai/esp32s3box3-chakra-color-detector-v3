@@ -57,3 +57,8 @@ venv/
 .packages
 .pub-cache/
 .pub/
+
+# AI Agents & Environment Configurations
+.agent/
+.github/agents/
+.github/agent/
