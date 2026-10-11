@@ -1,0 +1,64 @@
+# Gitignore settings for ESPHome
+# This is an example and may include too much for your use-case.
+# You can modify this file to suit your needs.
+/.esphome/
+/secrets.yaml
+
+# Ralph loop (symlinks to ~/.ralph-loop — not needed in git)
+/ralph.sh
+/scripts
+/.agent/logs/
+/.agent/history/
+.DS_Store
+
+# Backup / temp files — never commit
+*.bak
+*.pre-rewrite
+
+# AI Agents & Environment Configurations
+.agents/
+.claude/
+.gemini/
+.aionrs/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.vscode/
+.idea/
+.venv/
+venv/
+.python-version
+.eslintcache
+.mypy_cache/
+.pytest_cache/
+
+# AI Agents & Environment Configurations
+.superpowers/
+.superbrain/
+.brain/
+.env.telegram-remote
+.browseruse-venv/
+.uv_cache/
+.vercel/
+.wrangler/
+.opencode/
+.platformio/
+.esphome/
+.pio/
+.pioenvs/
+.piolibdeps/
+.terraform/
+.terraform.lock.hcl
+.dart_tool/
+.flutter-plugins-dependencies
+.metadata
+.packages
+.pub-cache/
+.pub/
+
+# AI Agents & Environment Configurations
+.agent/
+.github/agents/
+.github/agent/
