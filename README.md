@@ -1,3 +1,5 @@
+> **This project has moved on.** Its successor is **[Chakra Detection](https://github.com/leopardcodeai/chakra-detection)** for the ESP-Mosaico (ESP32-S31): a 4096-point FFT instead of 512, a confidence and steadiness gate, learned bowls, Flow and Strike modes, Hue, Home Assistant and WiZ lamps. This repository is archived (read-only) since 24 October 2026.
+
 # ESP32-S3-BOX-3 Chakra V3
 
 > **Real-time FFT sound analyser** for the ESP32-S3-BOX-3 — detects singing-bowl frequencies, maps them to the 7 chakras, and controls smart lights via Home Assistant. Built with vibe-coding workflows by [LeopardCode.AI](https://leopardcode.ai).
